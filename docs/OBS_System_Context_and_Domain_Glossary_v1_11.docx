@@ -1,0 +1,249 @@
+OPEX Budgeting System  —  System Context and Domain Glossary  —  v1.11 Draft**	CONFIDENTIAL | DRAFT**
+
+OPEX Budgeting System — System Context and Domain Glossary — v1.11 Draft
+
+**OPEX Budgeting System**
+
+**System Context and Domain Glossary**
+
+*Version 1.11 — Draft*
+
+*OBS_System_Context_and_Domain_Glossary_v1_11.docx*
+
+| **Amendment: v1.10 → v1.11**** Corrects the *****Salary expense***** definition and tidies the Document Control history. ****Changes in this amendment:**** ****(1) ****Workforce Planning Concepts — the *****Salary expense***** definition now matches the authoritative additive formula used in Functional Requirements: Workforce Planning v1.1 §5.1, Claude Code Implementation Guide v1.1 §9.1, and Build Sequencing Plan v1.1 Phase 4. January and February use *****base salary***** ÷ 12 (replacing the previously stated, undefined "prior annual salary"); March through December use *****new annual salary***** ÷ 12, where new annual salary = base salary + merit increase amount + salary adjustment. ******(2) ******Section 4 Document Control: rows reordered chronologically (v1.9 now precedes v1.10) and a v1.11 row added. ******(3) ******Related Documents list refreshed to current specification versions. Resolves ERR-01 and ERR-09 of the Specification Consistency & Errata Report v1.0.** |
+| --- |
+
+| **Document title** | **System Context and Domain Glossary** |
+| --- | --- |
+| System | OPEX Budgeting System (OBS) |
+| Version | 1.11 — Draft |
+| Status | For Review |
+| Audience | Development Team, Technical Leads, Project Stakeholders |
+| Supersedes | All prior versions v1.0 through v1.10 |
+
+# 1. Purpose and Scope
+
+This document establishes the foundational context and shared vocabulary for the OPEX Budgeting System. It serves two purposes: the System Context section defines the boundaries of the system, its users, and their relationships with external systems; the Domain Glossary defines the precise meaning of all domain terms used throughout the requirements, specifications, and codebase.
+
+This document is the authoritative reference for terminology. All subsequent specifications — functional requirements, technical specifications, UI specifications, and code — must use these terms consistently and precisely. Any new term introduced in a downstream document that is not defined here must be submitted as an amendment to this glossary before use.
+
+This specification is intended to be consumed directly by development teams and AI-assisted code generation tools.
+
+# 2. System Context
+
+**Note: ***Section 2 is unchanged from v1.8. It is reproduced here in full as this document is a full-replacement edition.*
+
+## 2.1 System Summary
+
+The OPEX Budgeting System (OBS) is an internal web application that replaces spreadsheet-based budget planning and workforce planning processes. It provides cost center owners with structured tools to enter and manage operating expense budgets, manage headcount plans and compensation, and view budget vs. actuals performance. Finance users review and approve submitted budgets. The system integrates with the accounting system (actuals import) and the HR admin system (employee data import).
+
+Primary functions: budget planning, workforce planning, actuals reporting, Finance approval workflow, in-application notifications.
+
+## 2.2 System Boundary
+
+The following capabilities are inside the OBS boundary:
+
+- Budget line entry and versioning across cost centers and expense accounts.
+
+- Workforce position management and compensation calculation.
+
+- Overhead allocation calculation (derived from headcount).
+
+- Budget vs. actuals reporting and variance analysis.
+
+- Finance approval workflow — cost center budget submission, review, approval, and rejection.
+
+- In-application notification delivery for workflow events.
+
+- User provisioning and access control (cost center grants, capability flags).
+
+- Data ingestion pipeline — actuals from accounting system, employee data from HR admin system, cost center and account hierarchies.
+
+The following are outside the OBS boundary:
+
+- Payroll processing — OBS produces budget figures only.
+
+- HR system configuration — the HR system is a read-only data source.
+
+- Benefits administration — burden rates represent employer cost; individual benefit elections are not managed in OBS.
+
+- General Ledger write-back — OBS never writes back to source systems.
+
+## 2.3 Users
+
+| **User Type** | **Description** | **Primary Activities** |
+| --- | --- | --- |
+| Cost center owner | A user with a standard permission grant (ALL_WRITE or ALL_READ) on one or more cost centers. | Enter and manage budget lines and workforce plans for assigned cost centers. |
+| Administrator | A user with is_administrator = TRUE. Has full, unrestricted access to all modules and all administrative functions. | Manage users, cost center assignments, global configuration, budget versions, and all system data. |
+| System Modeler | A user with is_system_modeler = TRUE. Manages business rules configuration tables (merit increase rates, burden rates, compensation component mappings). Read access to all reports. | Manage system configuration and data model; configure business rules; read all reports. |
+| Report Developer | A user with is_report_developer = TRUE. Creates, modifies, and publishes report type definitions. Read access to all reports across all cost centers. | Create, modify, and publish report definitions. |
+| Finance Reviewer | A user with is_finance_reviewer = TRUE. Reviews, approves, and rejects submitted cost center budgets within their assigned cost center scope. | Review, approve, and reject submitted budgets within assigned cost center scope. |
+
+The capability flag model is additive — a user may hold any combination of non-Administrator flags simultaneously. The four capability flags are: is_administrator, is_system_modeler, is_report_developer, is_finance_reviewer.
+
+## 2.4 External Systems
+
+| **System** | **Relationship** | **Data Provided** |
+| --- | --- | --- |
+| Accounting system | Read-only integration via file import. OBS never writes back. | Actuals (expenditure records), account hierarchy (chart of accounts). Exported as CSV/Excel to Azure Blob Storage landing zone. Imported hourly. |
+| HR admin system | Read-only integration via file import. OBS never writes back. | Employee records (position data, base salary, AIPEIP eligibility flag). Exported as Excel to Azure Blob Storage landing zone. Imported daily. |
+| Microsoft Entra ID | Identity provider. Authentication is fully delegated. | User authentication tokens (OIDC/OAuth 2.0 SSO). OBS does not manage credentials. |
+| Microsoft Teams | Operational alerting only — ingestion pipeline failures. | Not a data source. OBS sends pipeline failure notifications to a designated Teams channel via incoming webhook. |
+
+## 2.5 Data Flows
+
+- Actuals import: accounting system → Azure Blob Storage → OBS ingestion pipeline → obs.actuals (PostgreSQL obs schema). Hourly.
+
+- Employee import: HR admin system → Azure Blob Storage → OBS ingestion pipeline → obs.employees (PostgreSQL obs schema). Daily.
+
+- Budget entry: cost center owner → OBS API → obs.budget_lines (PostgreSQL obs schema). Real-time.
+
+- Workforce planning: cost center owner → OBS API → obs.positions (PostgreSQL obs schema) → calculation service → obs.budget_lines (personnel expense). Real-time.
+
+- Finance review: cost center owner submits budget → obs.finance_review_records created → Finance Reviewer approves/rejects → budget version status updated. Real-time.
+
+- In-application notifications: workflow events → OBS API → obs.notifications (PostgreSQL obs schema) → notification service API → user notification inbox. Synchronous with triggering event.
+
+- Reporting: OBS API aggregates obs.budget_lines + obs.actuals → report viewer. On-demand.
+
+# 3. Domain Glossary
+
+Terms are grouped by domain area. Within each group, terms are listed alphabetically. All terms defined here are authoritative — when a term appears in any specification, code, or user interface in this system, it carries exactly the meaning defined below.
+
+| **Organisational Dimensions** |  |  |
+| --- | --- | --- |
+| **Term** | **Do Not Use** | **Definition** |
+| **Cost center** | *CC, department, org unit* | The primary organisational unit for budget ownership and reporting. Cost center expenses are coded to expense accounts. Every budget line and every workforce record belongs to exactly one cost center. Cost center numbers and names are managed in the Administration module. |
+| **Cost center hierarchy** | *CC hierarchy, org hierarchy* | The parent-child rollup structure of cost centers, spanning from top-level functions down to individual cost centers. Supports four levels. Used to aggregate and report cost center data. |
+| **Cost center rollup** | *Rollup, rollup node, parent node* | A grouping of cost centers representing a higher level of the hierarchy above individual cost centers. A user assigned access to a rollup node receives access to all cost centers within that rollup. |
+| **Fiscal year** | *FY, budget year* | The twelve-month planning and reporting period. Currently aligned with the calendar year. All budget and actuals data is organised within a fiscal year context. |
+| **Planning period** | *Period, month, budget month* | A single calendar month within a fiscal year. The atomic unit of time for all budget lines, actuals records, and workforce costs. |
+| **Target cost center** | *Target CC, goal cost center* | A cost center designated as contributing toward corporate expense goals. The designation is stored as a boolean flag (**is_target_cost_center**) on the cost center record. The flag may be set or cleared by Administrators and System Modelers at any time. The flag has no effect on budget entry permissions, cost center hierarchy structure, or Finance review routing. It is used exclusively to filter and aggregate data in the context of corporate expense goal tracking. *▲ Added in v1.9* |
+
+| **Financial Dimensions** |  |  |
+| --- | --- | --- |
+| **Term** | **Do Not Use** | **Definition** |
+| **Account hierarchy** | *Account tree, COA hierarchy* | The parent-child rollup structure of expense accounts. Individual accounts roll up to account groups. Sourced from the accounting system chart of accounts. Read-only in OBS — the ingestion pipeline is the only write path. |
+| **Actuals** | *Actual spend, actuals data* | Real expenditure data imported from the accounting system. Represents what was actually spent for a given cost center, expense account, and planning period. Read-only in OBS — never modified after import. Imported hourly. |
+| **Budget** | *Budget plan, plan* | The planned expenditure entered by users with cost center write access for a future or current fiscal year. Organised by cost center, expense account, and planning period. |
+| **Budget line** | *Budget line item, line* | A single record representing the planned spend for one combination of cost center, expense account, planning period, and budget version. Has exactly one amount value. |
+| **Expense account** | *Account, GL account, account code* | A General Ledger account code used to classify the type of expenditure (e.g., salaries, software subscriptions, travel). Sourced from the accounting system chart of accounts. Read-only in OBS. |
+| **Target account** | *Target GL account, goal account* | An expense account designated as contributing toward corporate expense goals. The designation is stored as a boolean flag (**is_target_account**) on the expense account record. The flag may be set or cleared by Administrators and System Modelers at any time. Because the account hierarchy is read-only in OBS (the ingestion pipeline is the only write path for account structure), the is_target_account flag is the only account-level attribute that may be modified within OBS after import. The flag has no effect on budget entry permissions, account hierarchy structure, or Finance review routing. It is used exclusively to filter and aggregate data in the context of corporate expense goal tracking. *▲ Added in v1.9* |
+| **Variance** | *Budget variance, variance amount* | The arithmetic difference between actuals and budget for a given cost center, expense account, and period. May be expressed in absolute dollar terms or as a percentage of budget. Always a calculated value — never entered directly. |
+| **Version** | *Budget version* | A named snapshot of a budget at a point in time. Supports multiple versions per fiscal year (e.g., ‘Initial Budget’, ‘Q2 Reforecast’). One version is designated the active version for reporting at any given time. Prior versions are retained for comparison. |
+
+| **Budget Planning Concepts** |  |
+| --- | --- |
+| **Term** | **Definition** |
+| **Active version** | The budget version designated as the current official budget for a fiscal year. Reporting, variance calculation, and budget vs. actuals comparisons use the active version unless the user explicitly selects a different version. |
+| **Approval reason** | A mandatory free-form text field provided by a Finance Reviewer when approving a cost center budget submission. Maximum 2,000 characters. Stored on the finance review record. |
+| **Budget cycle** | The period during which users with cost center write access are actively entering and revising budget data. Budget cycles are defined by Administrators and determine when budget entry is open or locked for each cost center. |
+| **Budget entry** | The act of creating or updating budget lines for an assigned cost center. |
+| **Budget submission** | The act of a cost center owner (or Administrator) formally submitting a budget version for Finance review. Transitions the cost center’s participation in the version to ‘Submitted’ status and creates a finance review record. |
+| **Budget target** | A planning goal set by Administrators at the cost center / expense account / planning period / budget version level. Not a hard cap — users are not blocked from exceeding a target, but advisory indicators are shown. |
+| **Budget version status** | The current state of a budget version: Draft, Submitted, Approved, Rejected, or Archived. Governs whether budget lines may be edited and whether the version is visible to non-Administrator users. |
+| **Finance review record** | A record created when a cost center budget is submitted. Tracks the Finance Reviewer assignment, review status, and outcome (approval reason or rejection reason) for each submitted cost center within a budget version. |
+| **Rejection reason** | A mandatory free-form text field provided by a Finance Reviewer when rejecting a cost center budget submission. Maximum 2,000 characters. Stored on the finance review record. |
+
+| **Workforce Planning Concepts** |  |
+| --- | --- |
+| **Term** | **Definition** |
+| **AIPEIP bonus** | A discretionary annual incentive bonus. The dollar amount is entered manually per position by users with ALL_WRITE confidential data grant. Eligibility is determined by the AIPEIP eligibility flag imported from the HR admin system. |
+| **Budgeted headcount** | The count of positions (filled and open) in a cost center for a given fiscal year. Used in overhead allocation calculations. |
+| **Compensation burden** | Employer tax and benefit costs calculated on top of base salary: FICA, Medicare, state unemployment tax (SUTA), federal unemployment tax (FUTA), and other employer-paid benefits. Burden rates are Administrator-configured per fiscal year. FICA and unemployment components have a salary cap. |
+| **Confidential data grant** | ALL_WRITE, ALL_READ, or ALL_NONE per cost center. Controls all access to compensation data and Workforce Planning module operations. |
+| **Designated transfer approver** | A user designated on the receiving cost center record by the Administrator. Receives transfer approval requests for positions being transferred into that cost center. |
+| **Effective date** | The date on which a lifecycle event (salary adjustment, termination, retirement, transfer) takes effect. For terminations and retirements, this is the last day worked (inclusive). |
+| **FTE** | Full-Time Equivalent. A decimal value (e.g., 1.0, 0.5) representing the fraction of a full-time position. Applied as a multiplier in all compensation expense calculations. |
+| **Merit increase** | A global annual salary increase rate configured by the Administrator per fiscal year. Applied uniformly to all filled positions effective March 1 of the fiscal year. |
+| **New annual salary** | The post-merit-increase salary for a filled position: prior annual salary × (1 + merit increase rate). Used as the salary basis for March through December planning periods. |
+| **Other bonus** | A discretionary bonus amount entered manually per position by users with ALL_WRITE confidential data grant. Distinct from the AIPEIP bonus. |
+| **Overhead allocation** | Calculated read-only budget lines representing shared service costs spread across cost centers based on headcount and geography. Derived from headcount and burden rate configuration; not entered directly by cost center owners. |
+| **Personnel expense account** | An expense account flagged by the Administrator as receiving derived workforce planning data. Budget lines for these accounts are read-only in the Budget Planning module. |
+| **Position** | The atomic unit of workforce planning. Each position belongs to one cost center, has a status (filled or open), and drives personnel expense budget line calculations. |
+| **Salary adjustment** | A change to a filled position’s annual salary. Entered as a new dollar amount (not a percentage). Takes effect on the specified effective date. |
+| **Salary expense** | The monthly salary cost for a position. For January and February: base salary ÷ 12. For March through December: new annual salary ÷ 12, where new annual salary = base salary + merit increase amount + salary adjustment. Day-level proration applies for partial months (terminations, retirements, mid-month transfers). |
+| **Transfer** | The movement of a position from one cost center to another, subject to a designated approver workflow on the receiving cost center. |
+
+| **Reporting and Analytics Concepts** |  |
+| --- | --- |
+| **Term** | **Definition** |
+| **Comparison mode** | A filter panel setting in the report viewer that controls which prior-period or alternative-version column is displayed alongside the primary budget column. Available modes are: Prior Year Budget, Current Year Budget, Forecast Version, and None. |
+| **Forecast version** | A budget version designated by the user as the forecast for the purpose of report comparison. The forecast version is a per-view filter selection, not a system-level flag on the version record. |
+| **In-application notification** | A system-generated message delivered to a specific user’s notification inbox within the OBS web application. Notifications are triggered by defined workflow events. |
+| **Notification inbox** | A panel within the OBS application shell that displays all in-application notifications for the currently logged-in user. Accessible from the notification bell icon in the application header. |
+| **Report type** | A named, published set of available columns and default visibility settings that users open and filter in the report viewer. Report types are created by Report Developers and published for access by other users. |
+| **Saved filter** | A named set of filter panel selections saved by a user for reuse across sessions. Saved filters are personal — visible only to the user who created them. |
+| **Unread count** | The number of unread in-application notifications for the current user. Displayed as a badge on the notification bell icon in the application header. |
+| **Variance annotation** | A written note added by a user to a specific row in a report, scoped to a combination of cost center, expense account, fiscal year, and budget version. |
+
+| **Access Control Concepts** |  |
+| --- | --- |
+| **Term** | **Definition** |
+| **Administrator** | A user with is_administrator = TRUE. Has unrestricted access to every capability and every piece of data in the OBS without requiring cost center access grants. |
+| **Approval reason** | A mandatory free-form text field provided by a Finance Reviewer when approving a cost center budget submission. Maximum 2,000 characters. Stored on the finance review record. |
+| **Capability flag** | A boolean attribute on an OBS user record that grants a specific set of system-level capabilities. The four capability flags are is_administrator, is_system_modeler, is_report_developer, and is_finance_reviewer. |
+| **Confidential data grant** | ALL_WRITE, ALL_READ, or ALL_NONE per cost center assignment. Controls all access to compensation data and Workforce Planning module operations for a given cost center. |
+| **Cost center access grant** | An explicit assignment of a cost center (or cost center rollup) to a user, specifying a standard permission grant and a confidential data grant for that cost center scope. |
+| **Finance Reviewer** | A user with is_finance_reviewer = TRUE. Reviews, approves, and rejects submitted cost center budgets within their assigned cost center scope. |
+| **is_administrator** | Boolean capability flag. When TRUE, grants unrestricted access to all OBS capabilities and data. Supersedes all other flags and grants. |
+| **is_finance_reviewer** | Boolean capability flag. When TRUE, grants access to the Finance Review module and the ability to approve or reject submitted cost center budgets within assigned scope. |
+| **is_report_developer** | Boolean capability flag. When TRUE, grants the ability to create, modify, and publish report type definitions. |
+| **is_system_modeler** | Boolean capability flag. When TRUE, grants access to system configuration, data model management, and business rules configuration. |
+| **OBS user registry** | The PostgreSQL table (obs.users) in the obs schema that records every user who has been granted OBS login permission. Stores the user’s Entra ID object ID, display name, email, is_active flag, and all four capability flags. |
+| **Rejection reason** | A mandatory free-form text field provided by a Finance Reviewer when rejecting a cost center budget submission. Maximum 2,000 characters. Stored on the finance review record. |
+| **Standard permission grant** | ALL_WRITE or ALL_READ per cost center assignment. Controls non-personnel budget line write access for a given cost center. |
+
+| **Technical Concepts** |  |
+| --- | --- |
+| **Term** | **Definition** |
+| **Azure App Service** | The single primary API host for OBS — a Linux, Python 3.11 App Service instance running the FastAPI backend. |
+| **Azure Functions** | The batch ingestion execution host for OBS. Runs the ingestion pipeline on timer triggers (actuals hourly, employees daily) and a Blob Storage event trigger (hierarchies, ad hoc). |
+| **Calculation service** | A server-side service that evaluates business rules and returns recalculated figures. Always exposes dry-run endpoints — calculation and save are separate operations. |
+| **PostgreSQL obs schema** | The storage layer for all OBS data — the obs schema on an Azure PostgreSQL Flexible Server instance, the single source of truth for every obs.* table. |
+| **Dry-run** | A calculation invocation that returns results without persisting them to the database. The calculation service always exposes dry-run endpoints. |
+| **Ingestion pipeline** | The batch process that imports files from the Azure Blob Storage landing zone into the PostgreSQL obs schema. Runs via Azure Functions (timer triggers for actuals and employees; a Blob Storage event trigger for hierarchies). |
+
+# 4. Document Control
+
+| **Version** | **Date** | **Author** | **Change Summary** |
+| --- | --- | --- | --- |
+| 1.0 | Draft | TBD | Initial version — system context, users, external systems, data flows, core domain glossary. |
+| 1.1 | Draft | TBD | Terminology additions from UX and UI Specification v1.0. |
+| 1.2 | Draft | TBD | Terminology additions from Application Architecture Specification v3.0. |
+| 1.3 | Draft | TBD | Terminology additions from Security and Access Control Specification v1.0. |
+| 1.4 | Draft | TBD | Budget target definition placeholder added (resolved in v1.5). |
+| 1.5 | Draft | TBD | Budget target definition resolved. Merit increase corrected. New terms: Compensation burden, Overhead allocation. Section 2.4 updated for employee state of residence. |
+| 1.6 | Draft | TBD | Eight amendments from Workforce Planning FR v1.0: merit increase corrected to global rate; AIPEIP bonus rewritten; salary adjustment corrected; salary expense rewritten; compensation burden updated; new annual salary formula updated; confidential data updated; new terms: Budgeted headcount, Designated transfer approver. |
+| 1.6.1 | Draft | TBD | Three new terms deferred from Reporting FR v1.0: comparison mode, forecast version, report type, saved filter, variance annotation (deferred to v1.7). |
+| 1.7 | Draft | TBD | (A) Reporting FR v1.0 terms added: comparison mode, forecast version, report type, saved filter, variance annotation. (B) Finance Approval Workflow FR v1.0 terms: Finance Reviewer user type added; is_finance_reviewer flag; approval reason; rejection reason; budget submission; budget version status; finance review record. Sections 2.1, 2.2, 2.3, 2.5 updated. |
+| 1.8 | Draft | TBD | Full replacement — all content from v1.0 through v1.7 consolidated into single standalone document. Three new terms added: in-application notification, notification inbox, unread count (resolves OI-WP-03). |
+| 1.9 | Draft | TBD | Two new terms added to Organisational Dimensions and Financial Dimensions: target cost center (is_target_cost_center boolean flag on cost center record) and target account (is_target_account boolean flag on expense account record). Both designations settable by Administrators and System Modelers. |
+| 1.10 | Draft | Claude | Databricks-free platform cascade aligned to Architecture Spec v3.6 (sequenced last, after all references elsewhere were cleared). Technical Concepts: the **Delta Lake** entry was deleted and replaced with **Azure App Service**, **Azure Functions**, and **PostgreSQL obs schema** entries; **Dry-run** and **Ingestion pipeline** definitions updated (ingestion now runs via Azure Functions). §2.5 data-flow target qualifiers changed from "(Delta Lake)" to "(PostgreSQL obs schema)"; the **OBS user registry** definition changed from a Delta Lake table to a PostgreSQL table. No Databricks, Delta Lake, Z-ORDER, or MERGE terms remain defined. Related-document reference updated to Architecture v3.6. |
+| 1.11 | Draft | Claude | Corrected the **Salary expense** definition (Workforce Planning Concepts) to match the authoritative additive formula in Functional Requirements: Workforce Planning v1.1 §5.1, Claude Code Implementation Guide v1.1 §9.1, and Build Sequencing Plan v1.1 Phase 4: January and February use base salary ÷ 12 (not the previously stated, undefined "prior annual salary"); March through December use new annual salary ÷ 12, where new annual salary = base salary + merit increase amount + salary adjustment. Document Control history reordered chronologically (v1.9 before v1.10). Related Documents list refreshed to current versions. Resolves ERR-01 and ERR-09 of the Specification Consistency & Errata Report v1.0. |
+
+## Related Documents
+
+- OPEX Budgeting System — Application Architecture Specification v3.6
+
+- OPEX Budgeting System — Security and Access Control Specification v1.4
+
+- OPEX Budgeting System — UX and UI Specification v1.5
+
+- OPEX Budgeting System — Data Integration Specification v1.6
+
+- OPEX Budgeting System — In-Application Notification Mechanism Specification v1.1
+
+- OPEX Budgeting System — Functional Requirements: Budget Planning v1.1
+
+- OPEX Budgeting System — Functional Requirements: Workforce Planning v1.1
+
+- OPEX Budgeting System — Functional Requirements: Finance Approval Workflow v1.2
+
+- OPEX Budgeting System — Functional Requirements: Reporting v1.1
+
+- OPEX Budgeting System — Project Context Handoff v2.4
+
+OBS_System_Context_and_Domain_Glossary_v1_11.docx
+
+Page  of

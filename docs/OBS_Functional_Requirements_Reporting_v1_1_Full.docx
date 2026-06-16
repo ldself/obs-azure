@@ -1,0 +1,722 @@
+OPEX Budgeting System  —  Functional Requirements: Reporting**	CONFIDENTIAL | DRAFT**
+
+**OPEX Budgeting System**
+
+**Functional Requirements: Reporting**
+
+*Version 1.1 — Full Restatement*
+
+*OBS_Functional_Requirements_Reporting_v1_1_Full.docx*
+
+| **Document title** | **Functional Requirements: Reporting** |
+| --- | --- |
+| **System** | OPEX Budgeting System (OBS) |
+| **Version** | 1.1 — Full Restatement |
+| **Status** | For Review |
+| **Audience** | Development Team, Technical Leads, Project Stakeholders |
+| **Depends on** | OBS Application Architecture Specification v3.6; OBS System Context and Domain Glossary v1.11; OBS Security and Access Control Specification v1.4; OBS UX and UI Specification v1.5; OBS Data Integration Specification v1.6 |
+
+| ***Full Restatement Notice: This document is a full restatement of Functional Requirements: Reporting incorporating all amendments from v1.0 through v1.1. It supersedes all prior versions. All sections (1–16) are present in full — there is no need to consult any prior version file.*** |
+| --- |
+
+# 1. Purpose and Scope
+
+This document specifies the functional requirements for the Reporting module of the OPEX Budgeting System (OBS). It defines the business rules, data rules, access control behaviors, report definitions, and acceptance criteria that govern report viewing, variance analysis, version and year comparison, variance annotations, saved filters, and Excel export.
+
+This specification resolves the following open items from the Project Context Handoff v2.4:
+
+- Reporting — fixed templates vs. user-configurable reports.
+
+- Reporting — saved views.
+
+- Reporting — variance annotations and commentary.
+
+- Reporting — historical version comparison.
+
+## 1.1 In Scope
+
+- Report List page — display of published report types and report authoring access for Report Developers and Administrators.
+
+- Report viewer — filter panel, data grid, drill-down, variance color coding, and ‘Data as of’ and ‘Budget last set’ timestamps.
+
+- Report type definitions — two initial report types: Annual Budget Summary and Budget by Month.
+
+- Column and row visibility control — user-managed within published report type column sets.
+
+- Comparison mode — version-to-version comparison (within or across fiscal years) and year-over-year actuals comparison.
+
+- Variance annotations — written notes added per row by users with ALL_WRITE standard grant, visible to all users with access to the cost center.
+
+- Saved filters — personal, named filter sets persisted across sessions; unlimited per user.
+
+- Excel export — server-side, respecting confidential data grants and visible column selection.
+
+- Audit events for all reporting actions that constitute data mutations (annotation create/update/delete, saved filter create/update/delete, Excel export).
+
+- PostgreSQL schema additions required by this specification.
+
+- API endpoint requirements for all of the above.
+
+## 1.2 Out of Scope
+
+- Report definition authoring UI — the full interaction design is specified in UX and UI Specification v1.5 Section 7.6, which resolved OI-RPT-01.
+
+- Finance-side approval workflow — fully specified in Functional Requirements: Finance Approval Workflow v1.2.
+
+- In-application notification mechanism — fully specified in In-Application Notification Mechanism Specification v1.1.
+
+- Ad-hoc query building — users may not construct arbitrary queries or define new report types.
+
+## 1.3 Relationship to Other Specifications
+
+| **Document** | **Version** | **Relationship** |
+| --- | --- | --- |
+| System Context and Domain Glossary | v1.9 | Authoritative terminology source. All terms used in this document carry the exact meanings defined there. |
+| Application Architecture Specification | v3.6 | Authoritative architecture. API patterns, calculation service, PostgreSQL schema conventions, and technology choices are final. |
+| Security and Access Control Specification | v1.3 | Authoritative access control model. Capability flags, cost center permission framework, and confidential data grant model govern all access rules in this specification. |
+| UX and UI Specification | v1.4 | Authoritative UI design. v1.4 adds the full report definition authoring surface interaction design (Section 7.6), resolving OI-RPT-01. This document adds functional depth without changing UX decisions. |
+| Data Integration Specification | v1.5 | Authoritative ingestion pipeline. Actuals data currency is determined by the most recent completed actuals batch import. |
+| Functional Requirements: Budget Planning | v1.1 | Defines obs.budget_lines, obs.budget_targets, obs.budget_versions, and obs.vendor_line_items — all consumed by the Reporting module. |
+| Functional Requirements: Workforce Planning | v1.0 | Defines obs.positions and personnel expense budget lines — consumed by the Reporting module for compensation reporting where confidential grants permit. |
+| Project Context Handoff | v2.3 | Records all design decisions and open item resolutions across the project. |
+
+# 2. Terminology
+
+All terms below are defined in the Domain Glossary (OBS_System_Context_and_Domain_Glossary_v1_9.docx). They are listed here as a quick reference for readers of this document. No synonym or alternative phrasing is permitted in code, API contracts, database schemas, UI labels, or documentation.
+
+| **Authoritative Term** | **Definition Summary** |
+| --- | --- |
+| **Actuals** | Real expenditure data imported from the accounting system. Read-only in OBS. Imported hourly. |
+| **Active version** | The budget version designated as the current official budget for a fiscal year. Default for reporting unless the user selects a different version. |
+| **Budget line** | Single record: one cost center + one expense account + one planning period + one budget version. |
+| **Budget target** | Planning goal set at cost center / expense account / planning period / budget version level. Not a hard cap. |
+| **Budget version** | Named snapshot of a budget. Multiple versions per fiscal year. |
+| **Cost center** | Primary organizational unit for budget ownership and reporting. |
+| **Cost center hierarchy** | Four-level parent-child rollup structure of cost centers. |
+| **Expense account** | General Ledger account code classifying expenditure type. |
+| **Account hierarchy** | Parent-child rollup structure of expense accounts. Read-only in OBS. |
+| **Fiscal year** | The twelve-month planning and reporting period. Currently aligned with the calendar year. |
+| **Planning period** | A single calendar month within a fiscal year. The atomic unit of time for all data. |
+| **Rollup** | Aggregation of data across one or more dimensions. Computed by the reporting layer — never stored directly. |
+| **Variance** | Actuals minus budget for a given combination. Always calculated — never entered directly. |
+| **Administrator** | User with is_administrator = TRUE. Full access to all modules and administrative functions. |
+| **Report Developer** | User with is_report_developer = TRUE. May create, modify, and publish report types. |
+| **System Modeler** | User with is_system_modeler = TRUE. Read access to all reports across all cost centers. |
+| **Finance Reviewer** | User with is_finance_reviewer = TRUE. Access to Finance Review module. Report read access scoped to assigned cost centers. |
+| **Standard permission grant** | ALL_WRITE or ALL_READ per cost center. Controls budget line write access. |
+| **Confidential data grant** | ALL_WRITE, ALL_READ, or ALL_NONE per cost center. Controls access to compensation data. |
+
+# 3. Access Control
+
+All access control decisions are final as defined in the Security and Access Control Specification v1.4. This section summarizes the rules as they apply to the Reporting module.
+
+## 3.1 Reporting Access by User Type
+
+| **Access Type** | **Cost Center Scope** | **Compensation Columns** | **Annotation Write Access** |
+| --- | --- | --- | --- |
+| Administrator | All cost centers | Visible — all cost centers | Yes — all cost centers |
+| Report Developer | All cost centers | Visible — all cost centers | No — read-only capability flag; annotation write requires cost center ALL_WRITE grant |
+| System Modeler | All cost centers | Visible — all cost centers | No — read-only capability flag; annotation write requires cost center ALL_WRITE grant |
+| Finance Reviewer | Assigned cost centers only | Visible if ALL_READ or ALL_WRITE confidential grant; absent if ALL_NONE | No — Finance Reviewer flag does not confer annotation write access |
+| Cost center access grant (ALL_WRITE) | Assigned cost centers only | Visible if ALL_READ or ALL_WRITE confidential grant; absent if ALL_NONE | Yes — assigned cost centers only |
+| Cost center access grant (ALL_READ) | Assigned cost centers only | Visible if ALL_READ or ALL_WRITE confidential grant; absent if ALL_NONE | No — read-only grant |
+
+## 3.2 Confidential Data Enforcement
+
+Compensation columns — including base salary, bonus, burden, and any column derived from compensation — are absent from API responses for cost centers where the requesting user holds an ALL_NONE confidential data grant. The frontend must never be relied upon to suppress these fields. This rule applies in the Reporting module identically to its application in the Workforce Planning module.
+
+## 3.3 Saved Filters
+
+Saved filters are personal — a user's saved filters are visible only to that user. No user may read, modify, or delete another user's saved filters. The API enforces this by scoping all saved filter operations to the authenticated user's user_id.
+
+## 3.4 Variance Annotations
+
+Variance annotations are readable by all users who can view the relevant cost center data — including ALL_READ standard grant holders, System Modelers, Report Developers, Finance Reviewers, and Administrators. Write access (create, update, delete) is restricted to users with ALL_WRITE standard grant on the relevant cost center, plus Administrators.
+
+# 4. Report List Page
+
+The Reporting module landing page is defined in UX and UI Specification v1.5 Section 7.2. This section adds functional rules that underpin the UX design.
+
+## 4.1 Published Report Visibility
+
+- Only published report types appear in the Report List page for non-Administrator and non-Report Developer users.
+
+- Report Developers and Administrators see all report types regardless of published state (Draft and Published), to support authoring and testing.
+
+- Draft report types display an amber ‘Draft’ badge (MUI Chip) in the Report List to distinguish them from published reports. Visible to Report Developer and Administrator users only.
+
+- A ‘Manage Reports’ button is displayed in the Report List page header bar (right side), visible to Report Developer and Administrator only. Navigates to /reporting/manage.
+
+## 4.2 Report Type Metadata
+
+Each report type record carries the following metadata:
+
+| **Field** | **Description** |
+| --- | --- |
+| **report_id** | Unique identifier (UUID). Generated on creation. |
+| **report_name** | Display name shown in the Report List and report viewer header. Maximum 100 characters. |
+| **description** | Brief description shown in the Report List card. Maximum 500 characters. Nullable. |
+| **status** | ENUM: 'Draft' │ 'Published'. Draft reports are hidden from non-authoring users. |
+| **available_columns** | JSON array defining the columns available in this report type. Each entry includes column_id, display_name, data_field, default_visible (boolean), and is_compensation (boolean). |
+| **created_by** | user_id of the Report Developer or Administrator who created the record. |
+| **created_at** | UTC timestamp of creation. |
+| **published_at** | UTC timestamp of most recent publish action. Nullable. |
+| **published_by** | user_id of the user who last published. Nullable. |
+
+# 5. Report Definition Authoring
+
+Report authoring is accessible only to Report Developers and Administrators via the ‘Manage Reports’ action on the Report List page. The full interaction design is specified in UX and UI Specification v1.5 Section 7.6 (Report Definition Authoring), which resolved OI-RPT-01. This section defines the functional requirements that the authoring surface must implement.
+
+## 5.1 Authoring Capabilities
+
+- Name the report — a required text field, maximum 100 characters. Names must be unique across all report types.
+
+- Enter a description — an optional text field, maximum 500 characters.
+
+- Select available columns — choose which data fields are available as selectable columns within the report. Columns are drawn from the full set of reportable fields defined in Section 7 and Section 8. Column selection uses a two-panel layout with an Available Columns panel (with search filter) and a Report Columns panel (with drag-to-reorder via @hello-pangea/dnd).
+
+- Set default column visibility — for each available column, specify whether it is shown (default_visible = TRUE) or hidden (default_visible = FALSE) when a user first opens the report. Controlled via MUI Switch toggles per column.
+
+- Publish the report — transitions status from ‘Draft’ to ‘Published’, making the report visible to all eligible users in the Report List page. Requires a confirmation modal.
+
+- Unpublish the report — transitions status from ‘Published’ to ‘Draft’, hiding it from non-authoring users. Requires a confirmation modal with a saved-filter warning. Existing saved filters referencing an unpublished report remain stored but cannot be applied until the report is re-published.
+
+- Delete the report — Draft reports only. Published reports must be unpublished first (HTTP 409 if attempted on a Published report). Requires a confirmation modal. Generates REPORT_DEFINITION_DELETED audit event.
+
+- Unsaved changes are guarded by a warning modal when navigating away from the editor.
+
+## 5.2 Report Authoring API
+
+| **Claude Code note — Report definition API** | **obs.report_definitions table:   report_id     STRING NOT NULL  -- generated UUID   report_name   STRING NOT NULL  -- unique, max 100 chars   description   STRING           -- nullable, max 500 chars   status        STRING NOT NULL  -- ****'****Draft****'**** │ ****'****Published****'****   available_columns  STRING NOT NULL  -- JSON array (see Section 4.2)   created_by    STRING NOT NULL  -- user_id   created_at    TIMESTAMP NOT NULL   published_at  TIMESTAMP        -- nullable   published_by  STRING           -- nullable, user_id   updated_at    TIMESTAMP NOT NULL   updated_by    STRING NOT NULL POST   /api/v1/report-definitions              -- create draft GET    /api/v1/report-definitions              -- list all (authoring); published only (standard users) GET    /api/v1/report-definitions/{id}         -- get single report definition PATCH  /api/v1/report-definitions/{id}         -- update name, description, columns, status DELETE /api/v1/report-definitions/{id}         -- delete Draft only; Published requires unpublish first (HTTP 409) Authorization: POST/PATCH/DELETE require is_report_developer=TRUE or is_administrator=TRUE. GET is available to all authenticated users; non-authoring users receive only Published records. Audit events: REPORT_DEFINITION_CREATED, REPORT_DEFINITION_UPDATED,               REPORT_DEFINITION_PUBLISHED, REPORT_DEFINITION_UNPUBLISHED, REPORT_DEFINITION_DELETED** |
+| --- | --- |
+
+# 6. Report Viewer
+
+The report viewer UX is defined in UX and UI Specification v1.5 Section 7.3. This section adds the functional rules, data rules, and API contracts that underpin the viewer.
+
+## 6.1 Filter Panel
+
+All filter options defined in UX spec Section 7.3.1 are required. The following additional functional rules apply:
+
+### 6.1.1 Cost Center Filter
+
+- The cost center selector displays the full cost center hierarchy as a collapsible tree.
+
+- Users with cost center access grants see only their assigned cost centers and the rollup nodes that contain them.
+
+- Administrators, Report Developers, and System Modelers see the full hierarchy.
+
+- The user may select individual cost centers, a rollup node (which implicitly selects all cost centers within it), or any combination.
+
+- Selecting a rollup node does not restrict the selection — child cost centers remain individually selectable for exclusion.
+
+### 6.1.2 Row Visibility Filter
+
+- In addition to column visibility, users may filter which expense account rows are visible in the report grid.
+
+- The row visibility filter is a multi-select account hierarchy tree. Users may select individual accounts or account hierarchy groups.
+
+- Selecting an account hierarchy group shows all child accounts within it. Individual accounts within a group may be deselected.
+
+- At least one account row must remain visible — the API returns HTTP 422 if the row filter would produce an empty result.
+
+- Row visibility selections are included in the filter state for saved filter purposes (Section 10).
+
+### 6.1.3 Grouping Filter
+
+- Controls how planning periods are aggregated in column headers. Options: By month (default), By quarter, By half-year, By year.
+
+- When grouped by quarter: periods 1–3 = Q1, 4–6 = Q2, 7–9 = Q3, 10–12 = Q4. Column values are the sum of the constituent monthly amounts.
+
+- When grouped by half-year: periods 1–6 = H1, 7–12 = H2.
+
+- When grouped by year: a single column showing the annual total for each row.
+
+### 6.1.4 Budget Version Filter
+
+- Defaults to the active version for the selected fiscal year.
+
+- All non-Archived versions for the selected fiscal year are available for selection. Archived versions are hidden from non-Administrator users consistent with Budget Planning module rules.
+
+- Administrators see all versions including Archived.
+
+### 6.1.5 Comparison Mode Filter
+
+A ‘Comparison mode’ toggle is available in the filter panel. When enabled, the user selects one of two comparison types:
+
+| **Comparison Type** | **Behavior** |
+| --- | --- |
+| **Version comparison** | Adds a secondary budget version selector. The report shows both versions side by side for the same fiscal year, or the user may select a different fiscal year for the secondary version to enable cross-year version comparison. Variance columns show the difference between the primary and secondary version amounts. |
+| **Prior-year actuals comparison** | Adds a prior fiscal year selector (defaults to fiscal year - 1). The report shows current fiscal year budget (primary version) alongside prior fiscal year actuals. Two selectable sub-options: (a) current year actuals vs. prior year actuals, (b) current year budget vs. prior year actuals. Both variance columns are shown simultaneously when both sub-options are selected. |
+
+- Comparison mode may be combined with any other filter including grouping, row visibility, and column visibility.
+
+- When comparison mode is active, the fiscal year filter applies to the primary dataset. The secondary dataset's fiscal year is controlled by the comparison mode configuration.
+
+## 6.2 Data Grid
+
+The data grid behaviors defined in UX spec Section 7.3.2 are authoritative. The following functional rules supplement them:
+
+### 6.2.1 Row Hierarchy and Grouping
+
+- Row grouping mirrors the account hierarchy. Account hierarchy group rows display aggregate totals — the sum of all visible child account amounts.
+
+- Group rows are collapsible. A collapsed group row shows only the aggregate total, not the individual child rows.
+
+- When the user applies a row visibility filter, account hierarchy group row totals reflect only the selected child accounts — not the total of all children in the group.
+
+- Cost center rollup rows are displayed when the user selects a rollup node in the cost center filter. Rollup totals are always derived server-side.
+
+### 6.2.2 Variance Calculations
+
+| **Variance Column** | **Calculation** |
+| --- | --- |
+| **Variance (Actuals vs. Budget)** | Actuals amount minus budget amount. Positive = unfavorable (actuals exceed budget). Negative = favorable (actuals below budget). |
+| **Variance % (Actuals vs. Budget)** | (Actuals - Budget) / Budget × 100. Null when budget is zero or null. |
+| **Variance (Budget vs. Budget Target)** | Budget amount minus budget target amount. Null when budget target is null. |
+| **Variance % (Budget vs. Budget Target)** | (Budget - Target) / Target × 100. Null when target is zero or null. |
+| **Variance (Version comparison)** | Primary version amount minus secondary version amount. |
+| **Variance % (Version comparison)** | (Primary - Secondary) / Secondary × 100. Null when secondary is zero or null. |
+| **Variance (Prior-year actuals)** | Current period value minus prior year actuals. Current period value depends on the selected sub-option (current year actuals or current year budget). |
+| **Variance % (Prior-year actuals)** | Variance / Prior year actuals × 100. Null when prior year actuals is zero or null. |
+
+- All variance calculations are performed server-side. The frontend must never independently derive variance values.
+
+- Variance color coding: unfavorable (positive) in red; favorable (negative) in green; zero in default text color. Applied to both absolute and percentage variance columns.
+
+### 6.2.3 Data Currency Timestamps
+
+| **Timestamp** | **Display Location and Rule** |
+| --- | --- |
+| **Actuals data as of** | Displayed near the filter panel. Reflects the most recent completed actuals batch import completion timestamp. Format: ‘Actuals data as of [date] at [time] [timezone]’ — e.g., ‘Actuals data as of Apr 5, 2026 at 2:14 PM CST’. Returned by GET /api/v1/reporting/data-currency. Refreshed each time report data reloads — not cached. |
+| **Budget last set** | Displayed at the cost center level — one timestamp per cost center shown in the report. Reflects the latest updated_at timestamp across all budget lines for the selected cost center, fiscal year, and budget version. Format: ‘Budget last set [date] at [time] [timezone]’. Returned in the API report response payload as budget_last_set_at per cost center. |
+
+| **Claude Code note — Data currency API** | **GET /api/v1/reporting/data-currency Response: {   actuals_last_import_at: string (ISO 8601 UTC),   actuals_last_import_id: string (UUID) } budget_last_set_at is returned per cost center in the main report data response: Each cost_center object in the response includes: budget_last_set_at: string │ null** |
+| --- | --- |
+
+# 7. Report Type 1 — Annual Budget Summary
+
+The Annual Budget Summary report displays, for each expense account within the selected cost centers, a comparison of the current year budget against the budget target, a designated forecast version, and prior fiscal years. It is designed for year-level review and multi-year trend analysis.
+
+## 7.1 Report Purpose
+
+- Primary audience: cost center owners, Finance Reviewers, Administrators.
+
+- Primary use case: annual budget review; comparison of submitted budget to target, forecast, and prior year budgets.
+
+## 7.2 Available Columns
+
+| **Column ID** | **Display Name** | **Data Source** | **Default Visible** |
+| --- | --- | --- | --- |
+| account_name | Expense Account | obs.expense_accounts.account_name | Yes |
+| budget_y | Budget [Year Y] | Sum of obs.budget_lines.amount for selected version and cost center(s) | Yes |
+| budget_target_y | Budget Target [Year Y] | Sum of obs.budget_targets.target_amount for selected version and cost center(s) | Yes |
+| variance_vs_target | Vs. Target ($) | budget_y minus budget_target_y | Yes |
+| variance_vs_target_pct | Vs. Target (%) | (budget_y - budget_target_y) / budget_target_y × 100 | Yes |
+| forecast_y | Forecast [Year Y] | Sum of budget lines for the user-selected forecast version | Yes |
+| variance_vs_forecast | Vs. Forecast ($) | budget_y minus forecast_y | Yes |
+| variance_vs_forecast_pct | Vs. Forecast (%) | (budget_y - forecast_y) / forecast_y × 100 | Yes |
+| budget_y_minus_1 | Budget [Year Y-1] | Sum of budget lines for active version of prior fiscal year | Yes |
+| variance_vs_prior_budget | Vs. Prior Budget ($) | budget_y minus budget_y_minus_1 | Yes |
+| variance_vs_prior_budget_pct | Vs. Prior Budget (%) | (budget_y - budget_y_minus_1) / budget_y_minus_1 × 100 | No |
+| actuals_y | Actuals [Year Y] | Sum of obs.actuals for current fiscal year to date | No |
+| variance_vs_actuals | Vs. Actuals ($) | actuals_y minus budget_y (positive = unfavorable) | No |
+| variance_vs_actuals_pct | Vs. Actuals (%) | (actuals_y - budget_y) / budget_y × 100 | No |
+| annotation | Annotation | obs.report_annotations content for this row/context | No |
+
+## 7.3 Multi-Year Display
+
+- The fiscal year filter for this report supports selection of multiple fiscal years simultaneously. When multiple fiscal years are selected, budget, target, forecast, and prior-year columns are repeated for each selected year.
+
+- Column headers include the fiscal year in square brackets — e.g., ‘Budget [2026]’, ‘Budget [2025]’.
+
+- The forecast version is selected independently per fiscal year when multiple years are displayed. If no forecast version exists for a year, the forecast column for that year is blank.
+
+- A maximum of 5 fiscal years may be displayed simultaneously. The API returns HTTP 422 if more than 5 fiscal years are requested.
+
+## 7.4 Forecast Version
+
+- The forecast version is a budget version the user designates as the forecast for the purpose of this report. It is not a system-level designation — it is a per-report-view selection in the filter panel.
+
+- The forecast version selector in the filter panel shows all non-Archived versions for the selected fiscal year. The active version is the default.
+
+- When the user selects a different version as the forecast, the Forecast column and its variance columns update accordingly.
+
+- A forecast version is always the same fiscal year as the primary budget version. Cross-year forecast comparison is achieved through the multi-year display (Section 7.3) or comparison mode (Section 6.1.5), not the forecast version selector.
+
+| **Claude Code note — Annual Budget Summary API** | **GET /api/v1/reports/annual-budget-summary Query parameters:   cost_center_ids: string[]   -- comma-separated cost center IDs or rollup IDs   fiscal_years: int[]         -- comma-separated, max 5   version_id: string          -- primary budget version ID   forecast_version_ids: {fiscal_year: int, version_id: string}[]  -- one per fiscal year   account_ids: string[]       -- optional row filter; defaults to all   columns: string[]           -- visible column IDs from Section 7.2 Response shape (per fiscal year, per cost center, per account):   { fiscal_year, cost_center_id, cost_center_name, budget_last_set_at,     rows: [{ account_code, account_name, account_hierarchy_path, is_group_row,       budget_y, budget_target_y, forecast_y, budget_y_minus_1, actuals_y,       variance_vs_target, variance_vs_target_pct, variance_vs_forecast,       variance_vs_forecast_pct, variance_vs_prior_budget, variance_vs_prior_budget_pct,       variance_vs_actuals, variance_vs_actuals_pct, annotation, annotation_id }] } Compensation columns absent for cost centers where requesting user has ALL_NONE confidential grant. All rollup/aggregate rows are computed server-side — never by the frontend.** |
+| --- | --- |
+
+# 8. Report Type 2 — Budget by Month
+
+The Budget by Month report displays the budget for each expense account for each planning period of the selected fiscal year. It supports analysis at any level of the account hierarchy and cost center hierarchy, and compares the total annual budget against the budget target and the current year budget (the active version for the selected fiscal year).
+
+## 8.1 Report Purpose
+
+- Primary audience: cost center owners reviewing monthly budget phasing, Finance Reviewers reviewing budget distribution.
+
+- Primary use case: monthly budget review; comparison of total year budget to target and current year budget.
+
+## 8.2 Hierarchy Drill-Down
+
+- The report supports viewing data at any level of both the account hierarchy and the cost center hierarchy simultaneously.
+
+- Account hierarchy levels: individual accounts (leaf level), account groups at any parent level up to the root. Group rows display the sum of all child amounts.
+
+- Cost center hierarchy levels: individual cost centers (leaf level), rollup nodes at any level of the cost center hierarchy. Rollup rows display the sum of all child cost center amounts.
+
+- The user controls the drill-down level via the filter panel row visibility filter (account hierarchy) and cost center filter (cost center hierarchy).
+
+- Drill-down is available inline — clicking a group row expands it to show child rows without leaving the report. Clicking again collapses it.
+
+## 8.3 Available Columns
+
+Period columns are dynamic — one column per planning period within the selected fiscal year (12 columns maximum). Column headers are the abbreviated month name and year — e.g., ‘Jan 2026’.
+
+| **Column ID** | **Display Name** | **Data Source** | **Default Visible** |
+| --- | --- | --- | --- |
+| account_name | Expense Account | obs.expense_accounts.account_name | Yes |
+| period_N_budget | Jan [Y] … Dec [Y] | obs.budget_lines.amount per period (1–12) for selected version | Yes — all 12 |
+| total_budget | Total Budget | Sum of all period_N_budget columns | Yes |
+| budget_target_total | Budget Target | Sum of obs.budget_targets.target_amount across all periods | Yes |
+| variance_vs_target | Vs. Target ($) | total_budget minus budget_target_total | Yes |
+| variance_vs_target_pct | Vs. Target (%) | (total_budget - budget_target_total) / budget_target_total × 100 | Yes |
+| cy_budget_total | Current Year Budget | Sum of budget lines for active version of the selected fiscal year | Yes |
+| variance_vs_cy | Vs. CY Budget ($) | total_budget minus cy_budget_total | Yes |
+| variance_vs_cy_pct | Vs. CY Budget (%) | (total_budget - cy_budget_total) / cy_budget_total × 100 | No |
+| actuals_period_N | Actuals Jan [Y] … Dec [Y] | obs.actuals amount per period | No — all 12 |
+| actuals_total | Total Actuals | Sum of actuals across all periods | No |
+| variance_vs_actuals | Vs. Actuals ($) | actuals_total minus total_budget (positive = unfavorable) | No |
+| annotation | Annotation | obs.report_annotations content for this row/context | No |
+
+## 8.4 Grouping Behavior
+
+- The grouping filter (By month / By quarter / By half-year / By year) controls how period columns are aggregated. When grouped by quarter, the 12 period columns collapse to 4 quarter columns; by half-year to 2; by year to 1.
+
+- The Total Budget, Budget Target, and Current Year Budget summary columns always reflect the full fiscal year total regardless of the grouping selection.
+
+## 8.5 Current Year Budget Column
+
+- The current year budget (CY Budget) column always reflects the active version for the selected fiscal year — regardless of which version the user has selected as the primary version for the report.
+
+- When the active version is the same as the selected primary version, the Vs. CY Budget variance columns will be zero.
+
+- If no active version exists for the selected fiscal year, the CY Budget column is blank and the Vs. CY Budget columns are null.
+
+| **Claude Code note — Budget by Month API** | **GET /api/v1/reports/budget-by-month Query parameters:   cost_center_ids: string[]   -- individual cost centers or rollup IDs   fiscal_year: int   version_id: string          -- primary version   grouping: string            -- ****'****month****'**** │ ****'****quarter****'**** │ ****'****half_year****'**** │ ****'****year****'****   account_ids: string[]       -- optional row filter   columns: string[]           -- visible column IDs Response shape (per cost center, per account row):   { fiscal_year, cost_center_id, cost_center_name, budget_last_set_at,     active_version_id,     rows: [{ account_code, account_name, account_hierarchy_path, is_group_row,       periods: [{period_number, budget, actuals}],       total_budget, budget_target_total, cy_budget_total, actuals_total,       variance_vs_target, variance_vs_target_pct, variance_vs_cy, variance_vs_cy_pct,       variance_vs_actuals, annotation, annotation_id }] } Grouping aggregation performed server-side. period_number values reflect the grouping:   month: 1–12; quarter: 1–4; half_year: 1–2; year: 1. Compensation fields absent for ALL_NONE confidential grant cost centers.** |
+| --- | --- |
+
+# 9. Variance Annotations
+
+Variance annotations allow authorized users to add written explanations to specific report data rows. Annotations are stored in the PostgreSQL obs schema and are visible to all users with access to the relevant cost center data.
+
+## 9.1 Annotation Scope
+
+- An annotation is attached to a specific row context defined by: cost_center_id + account_code + fiscal_year + version_id.
+
+- One annotation per unique row context. Creating a second annotation on the same row context overwrites the existing annotation (update, not insert).
+
+- Annotations are report-type-agnostic — an annotation set on a row is visible in both the Annual Budget Summary and the Budget by Month report for the same row context.
+
+- Annotations are not planning-period-specific. An annotation on a cost center + account + fiscal year + version applies to that row regardless of how planning periods are displayed.
+
+## 9.2 Annotation Content Rules
+
+- Maximum annotation length: 1,000 characters.
+
+- Annotations are plain text. No markup or formatting is stored.
+
+- The annotation field is nullable. Deleting an annotation sets the annotation to null (does not delete the row).
+
+## 9.3 Annotation Visibility
+
+- Annotations are visible in the report grid when the ‘Annotation’ column is enabled in the visible columns filter.
+
+- Annotations are visible to all users who can view the relevant cost center data, regardless of their standard permission grant level (ALL_WRITE or ALL_READ) or capability flags.
+
+- Budget Planning module commentary (obs.budget_lines.commentary) is a separate field from Reporting annotations. Budget Planning commentary is available as a read-only column in report views where the expense account row is visible. It is not editable in the Reporting module.
+
+## 9.4 Annotation Write Access
+
+- Only users with ALL_WRITE standard grant on the relevant cost center, plus Administrators, may create, update, or delete annotations.
+
+- The annotation field in the report grid displays an edit icon (pencil) for authorized users. Clicking opens an inline text input. Saving triggers the PATCH annotation endpoint.
+
+- Users without write access see the annotation as read-only text in the column.
+
+| **Claude Code note — Annotation schema and API** | **obs.report_annotations table:   annotation_id     STRING NOT NULL  -- generated UUID   cost_center_id    STRING NOT NULL   account_code      STRING NOT NULL   fiscal_year       INT NOT NULL   version_id        STRING NOT NULL  -- FK obs.budget_versions   annotation_text   STRING           -- nullable, max 1000 chars   created_by        STRING NOT NULL  -- user_id   created_at        TIMESTAMP NOT NULL   updated_by        STRING NOT NULL   updated_at        TIMESTAMP NOT NULL   PRIMARY KEY (cost_center_id, account_code, fiscal_year, version_id) GET    /api/v1/report-annotations?cost_center_ids=...****&****fiscal_year=...****&****version_id=...   Returns all annotations for the requested scope. PUT    /api/v1/report-annotations   Body: { cost_center_id, account_code, fiscal_year, version_id, annotation_text }   Upsert — creates or updates the annotation for the given row context.   Authorization: ALL_WRITE standard grant on cost_center_id, or is_administrator=TRUE.   Returns HTTP 403 otherwise. Returns HTTP 422 if annotation_text exceeds 1000 characters. DELETE /api/v1/report-annotations/{annotation_id}   Sets annotation_text = null. Does not delete the row.   Authorization: same as PUT. Audit events:   REPORT_ANNOTATION_CREATED: annotation_id, cost_center_id, account_code, fiscal_year, version_id, user_id   REPORT_ANNOTATION_UPDATED: annotation_id, old_text (first 100 chars), new_text (first 100 chars), user_id   REPORT_ANNOTATION_DELETED: annotation_id, cost_center_id, account_code, fiscal_year, version_id, user_id** |
+| --- | --- |
+
+# 10. Saved Filters
+
+Saved filters allow users to preserve a named set of filter selections and restore them in future sessions. Saved filters are personal — visible only to the user who created them.
+
+## 10.1 Filter State Captured
+
+A saved filter captures the complete filter panel state at the time of saving:
+
+- Report type (report_definition_id).
+
+- Cost center selection (list of cost_center_ids and/or rollup IDs).
+
+- Fiscal year selection.
+
+- Time frame (start and end planning period numbers).
+
+- Grouping selection (month / quarter / half-year / year).
+
+- Budget version selection (version_id).
+
+- Visible columns selection (list of column IDs).
+
+- Row visibility selection (list of account IDs or account group IDs).
+
+- Comparison mode state (disabled / version comparison / prior-year actuals comparison) and comparison mode parameters (secondary version ID, prior fiscal year, sub-option selection).
+
+## 10.2 Saved Filter Rules
+
+- Saved filters are personal. A user's saved filters are visible only to that user. No user may view, modify, or delete another user's saved filters.
+
+- There is no limit on the number of saved filters per user.
+
+- Saved filter names must be unique per user. Duplicate names within the same user are rejected at the API layer (HTTP 409).
+
+- Maximum saved filter name length: 100 characters.
+
+- If a saved filter references a budget version that has since been archived or deleted, the filter loads with a warning: ‘The saved version [version name] is no longer available. The active version has been selected.’ The active version is substituted.
+
+- If a saved filter references a report type that has been unpublished, the filter cannot be applied and displays a warning: ‘This report is no longer available.’
+
+## 10.3 Saved Filter Interactions
+
+- A ‘Save current filters’ action is available in the filter panel. Clicking opens a name input prompt. On confirm, the current filter state is persisted as a new saved filter (or updates an existing one if the user chooses to overwrite).
+
+- A ‘Saved filters’ dropdown in the filter panel lists all of the user's saved filters for the current report type. Selecting one applies the saved filter state to the filter panel. The user must click ‘Apply’ to load the report data.
+
+- A ‘Manage saved filters’ link navigates to a simple list where the user can rename or delete their saved filters.
+
+| **Claude Code note — Saved filter schema and API** | **obs.saved_filters table:   filter_id          STRING NOT NULL  -- generated UUID   user_id            STRING NOT NULL  -- Entra ID object ID of owning user   report_definition_id STRING NOT NULL -- FK obs.report_definitions   filter_name        STRING NOT NULL  -- max 100 chars; unique per user   filter_state       STRING NOT NULL  -- JSON blob of complete filter panel state   created_at         TIMESTAMP NOT NULL   updated_at         TIMESTAMP NOT NULL   PRIMARY KEY (filter_id)   UNIQUE (user_id, filter_name) GET    /api/v1/saved-filters?report_definition_id={id}   Returns all saved filters for the authenticated user and the specified report.   Scoped to user_id from the access token — never returns other users****'**** filters. POST   /api/v1/saved-filters   Body: { report_definition_id, filter_name, filter_state }   Returns HTTP 409 if filter_name already exists for this user.   Returns HTTP 422 if filter_name exceeds 100 characters. PATCH  /api/v1/saved-filters/{filter_id}   Body: { filter_name?, filter_state? }   Validates ownership (user_id must match authenticated user) — returns HTTP 403 otherwise. DELETE /api/v1/saved-filters/{filter_id}   Deletes the saved filter. Validates ownership. Audit events:   SAVED_FILTER_CREATED: filter_id, report_definition_id, user_id   SAVED_FILTER_UPDATED: filter_id, user_id   SAVED_FILTER_DELETED: filter_id, report_definition_id, user_id** |
+| --- | --- |
+
+# 11. Excel Export
+
+Excel export behaviour is defined in UX and UI Specification v1.5 Section 7.3.3. This section adds the functional and data rules that underpin the export.
+
+## 11.1 Export Scope
+
+- The export includes all visible rows and all visible columns as configured by the user's current column and row visibility filter selections.
+
+- Compensation columns are excluded from the export for cost centers where the exporting user holds an ALL_NONE confidential data grant.
+
+- Rollup rows and account hierarchy group rows are included in the export with their aggregate values.
+
+- When comparison mode is active, the comparison columns are included in the export.
+
+## 11.2 Export Format
+
+- File format: .xlsx generated server-side via openpyxl.
+
+- File name pattern: {report_name}_{cost_center_or_rollup_name}_{fiscal_year}_{YYYYMMDD}.xlsx.
+
+- The first row of the export is a header row matching the column display names.
+
+- Numeric values are formatted as numbers with two decimal places. Currency columns use the currency number format.
+
+- Variance percentage columns are formatted as percentages with one decimal place.
+
+- The ‘Actuals data as of’ and ‘Budget last set’ timestamps are included in a summary block above the data grid in the export.
+
+- Performance target: single cost center export must complete within 10 seconds. Large multi-cost-center exports may exceed this and should display a loading indicator.
+
+## 11.3 Export Audit
+
+| **Claude Code note — Excel export API and audit** | **POST /api/v1/reports/export Body: {   report_definition_id: string,   parameters: { ...same query parameters as the report data endpoint } } Response: signed URL for download (Azure Blob Storage pre-signed URL) or           binary blob response — implementation choice based on file size. Audit event: REPORT_EXPORTED   Fields: user_id, report_definition_id, cost_center_ids, fiscal_year,           version_id, column_count, row_count, exported_at, file_name** |
+| --- | --- |
+
+# 12. PostgreSQL Schema Additions
+
+This section consolidates all new PostgreSQL tables required by this specification. Existing schemas defined in prior specifications are not repeated — only additions are listed.
+
+## 12.1 New Tables
+
+| **Table** | **Purpose** |
+| --- | --- |
+| **obs.report_definitions** | Stores report type metadata, available columns, and publication status. Defined in Section 5.2. |
+| **obs.report_annotations** | Stores per-row variance annotations. Defined in Section 9.4. |
+| **obs.saved_filters** | Stores user personal saved filter sets per report type. Defined in Section 10.3. |
+
+## 12.2 No Amendments to Existing Tables
+
+No amendments to existing PostgreSQL tables are required by this specification. The Reporting module reads from existing tables (obs.budget_lines, obs.budget_targets, obs.budget_versions, obs.actuals, obs.positions, obs.cost_center_hierarchy_nodes, obs.account_hierarchy_nodes) without modification.
+
+# 13. Audit Events
+
+All events below are written to the OBS audit log (PostgreSQL — append-only, enforced by a BEFORE UPDATE OR DELETE trigger). All events capture a minimum of: event_type, user_id, timestamp, and the entity IDs listed per event. The audit log schema is defined in the Application Architecture Specification v3.6 Section 7.
+
+| **Event Type** | **Additional Captured Fields** |
+| --- | --- |
+| **REPORT_DEFINITION_CREATED** | report_id, report_name, created_by |
+| **REPORT_DEFINITION_UPDATED** | report_id, report_name, updated_by, fields_changed |
+| **REPORT_DEFINITION_PUBLISHED** | report_id, report_name, published_by |
+| **REPORT_DEFINITION_UNPUBLISHED** | report_id, report_name, user_id |
+| **REPORT_DEFINITION_DELETED** | report_id, report_name, user_id |
+| **REPORT_ANNOTATION_CREATED** | annotation_id, cost_center_id, account_code, fiscal_year, version_id, user_id |
+| **REPORT_ANNOTATION_UPDATED** | annotation_id, cost_center_id, account_code, fiscal_year, version_id, old_text (first 100 chars), new_text (first 100 chars), user_id |
+| **REPORT_ANNOTATION_DELETED** | annotation_id, cost_center_id, account_code, fiscal_year, version_id, user_id |
+| **SAVED_FILTER_CREATED** | filter_id, report_definition_id, filter_name, user_id |
+| **SAVED_FILTER_UPDATED** | filter_id, filter_name, user_id, fields_changed |
+| **SAVED_FILTER_DELETED** | filter_id, report_definition_id, filter_name, user_id |
+| **REPORT_EXPORTED** | user_id, report_definition_id, cost_center_ids, fiscal_year, version_id, column_count, row_count, file_name, exported_at |
+
+# 14. Open Items
+
+| **OI-RPT-01 — Report definition authoring UI — UX specification amendment required — RESOLVED**** UX and UI Specification v1.4 was issued incorporating the full interaction design for the report definition authoring surface. The following changes were incorporated: Section 7.2 — Report List page updated with amber Draft badge display (MUI Chip on Draft report cards, visible to Report Developer and Administrator users only) and ‘Manage Reports’ button (Report List page header bar, right side, visible to Report Developer and Administrator only, navigates to /reporting/manage). Section 7.6 — New section added: Report Definition Authoring. Covers the Report Definition Management screen (MUI Data Grid of all report definitions with status chips and row-level action menu), the Report Definition Editor screen (Report Details section with name/description/status; Column Configuration section with Available Columns panel with search filter and Report Columns panel with drag-to-reorder via @hello-pangea/dnd and Default Visible MUI Switch toggles), Save flow (POST/PATCH with duplicate name validation), Publish flow (confirmation modal, clean saved state required), Unpublish flow (confirmation modal with saved-filter warning), Delete flow (Draft only, confirmation modal), unsaved change warning modal, and access control enforcement. Acceptance criteria AC-UP-RPT-AUTH-01 through AC-UP-RPT-AUTH-18 added to UX and UI Specification v1.4. The blocking qualifier on report definition authoring surface implementation is superseded — full implementation per UX and UI Specification v1.4 Section 7.6 is required.** |
+| --- |
+
+All open items are now resolved. No outstanding items remain in this specification.
+
+**Resolved in v1.0:** The following open items from Project Context Handoff v2.3 were resolved by the v1.0 specification:
+
+| **Item** | **Resolution** |
+| --- | --- |
+| Reporting — fixed templates vs. user-configurable reports | Resolved. Reports are fixed types published by Report Developers. Users may control column visibility and row visibility within the available column set of the published report type. Users may not create ad-hoc queries or define new report types. |
+| Reporting — saved views | Resolved. Users may save named filter sets (saved filters) that persist across sessions. Saved filters are personal. No limit on saved filters per user. See Section 10. |
+| Reporting — variance annotations and commentary | Resolved. Users with ALL_WRITE standard grant on a cost center may add written annotations to specific report rows. Budget Planning module commentary is read-only in the Reporting module. Annotations and commentary are separate fields. See Section 9. |
+| Reporting — historical version comparison | Resolved. Users may compare two budget versions side by side (within or across fiscal years) and may compare current year actuals or budget against prior year actuals. See Section 6.1.5. |
+
+# 15. Acceptance Criteria
+
+Each criterion below must be verified by automated test or documented manual test procedure before the Reporting module is considered complete. Criteria from UX and UI Specification v1.5 Sections 7.5 and 7.6 (AC-UP-RPT-01 through AC-UP-RPT-09 and AC-UP-RPT-AUTH-01 through AC-UP-RPT-AUTH-18) remain in force and are not repeated here — this section adds the functional and data-layer criteria.
+
+## 15.1 Access Control
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-RPT-AC-01** | An Administrator receives report data for all cost centers without any cost center grant. |
+| **AC-RPT-AC-02** | A Report Developer receives report data for all cost centers regardless of cost center grants. |
+| **AC-RPT-AC-03** | A System Modeler receives report data for all cost centers regardless of cost center grants. |
+| **AC-RPT-AC-04** | A user with only ALL_READ standard grant on one cost center receives report data for that cost center only. Requests for other cost centers return HTTP 403. |
+| **AC-RPT-AC-05** | Compensation columns are absent from API responses for cost centers where the requesting user holds ALL_NONE confidential data grant — fields are absent from the payload, not null. |
+| **AC-RPT-AC-06** | Excel export excludes compensation columns for cost centers where the exporting user holds ALL_NONE confidential data grant. |
+| **AC-RPT-AC-07** | Annotation write attempts by a user with ALL_READ standard grant (and no Administrator flag) return HTTP 403. |
+| **AC-RPT-AC-08** | Saved filter read operations return only the authenticated user's own saved filters — never another user's. |
+| **AC-RPT-AC-09** | Saved filter write and delete operations on a filter_id belonging to a different user return HTTP 403. |
+
+## 15.2 Report Viewer and Filters
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-RPT-VW-01** | The report data grid displays all rows and columns matching the current filter panel state. Changes to filters do not take effect until the user clicks 'Apply'. |
+| **AC-RPT-VW-02** | The 'Reset to defaults' link restores all filter panel controls to their default values. |
+| **AC-RPT-VW-03** | Selecting a rollup node in the cost center filter includes all child cost centers in the report. Adding a new cost center under that rollup is automatically included on next report load. |
+| **AC-RPT-VW-04** | The row visibility filter restricts visible account rows to the selected set. Account hierarchy group rows reflect only the selected children, not the total of all children. |
+| **AC-RPT-VW-05** | Grouping by quarter produces four column groups (Q1–Q4) each containing the sum of their constituent monthly budget and actuals amounts. |
+| **AC-RPT-VW-06** | Grouping by half-year produces two column groups (H1, H2). Grouping by year produces one annual total column. |
+| **AC-RPT-VW-07** | The 'Data as of' timestamp is returned by /api/v1/reporting/data-currency and refreshed on every report data load. It is never cached from a prior session. |
+| **AC-RPT-VW-08** | The 'Budget last set' timestamp is returned per cost center in the report API response and reflects the latest updated_at across all budget lines for that cost center, fiscal year, and version. |
+| **AC-RPT-VW-09** | All variance values displayed in the grid match the server-returned values — the frontend does not independently derive variance calculations. |
+| **AC-RPT-VW-10** | All rollup and aggregate row values are computed server-side and match the sum of their constituent rows. |
+| **AC-RPT-VW-11** | Attempting to apply a row visibility filter that would produce zero visible rows returns HTTP 422. |
+
+## 15.3 Comparison Mode
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-RPT-CM-01** | When version comparison mode is active, the report shows budget amounts for both the primary and secondary versions as separate columns, plus a variance column showing primary minus secondary. |
+| **AC-RPT-CM-02** | Version comparison supports selecting versions from different fiscal years. The secondary version's fiscal year is independent of the primary fiscal year filter. |
+| **AC-RPT-CM-03** | When prior-year actuals comparison mode is active with sub-option 'current year actuals vs. prior year actuals', the report shows both actuals datasets and their variance. |
+| **AC-RPT-CM-04** | When prior-year actuals comparison mode is active with sub-option 'current year budget vs. prior year actuals', the report shows the primary version budget alongside prior year actuals and their variance. |
+| **AC-RPT-CM-05** | Both sub-options may be selected simultaneously, producing all four data columns (current actuals, prior actuals, current budget, prior actuals) plus both variance columns. |
+| **AC-RPT-CM-06** | Comparison mode may be combined with any grouping selection (month, quarter, half-year, year). |
+
+## 15.4 Annual Budget Summary Report
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-RPT-ABS-01** | The Annual Budget Summary report displays one row per leaf-level expense account visible to the user, plus account hierarchy group rows aggregating child accounts. |
+| **AC-RPT-ABS-02** | The Forecast column reflects the budget version the user has designated as the forecast in the filter panel — not a system-level designation. |
+| **AC-RPT-ABS-03** | Selecting multiple fiscal years produces separate budget, target, forecast, and prior-year columns for each year, with fiscal year indicated in the column header. |
+| **AC-RPT-ABS-04** | A maximum of 5 fiscal years may be selected simultaneously. Requests for more than 5 fiscal years return HTTP 422. |
+| **AC-RPT-ABS-05** | If no active version exists for a prior fiscal year, the prior-year budget column for that year is blank (null) and variance columns referencing it are null. |
+| **AC-RPT-ABS-06** | Variance percentage columns display null (blank) when the denominator is zero or null. |
+
+## 15.5 Budget by Month Report
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-RPT-BBM-01** | The Budget by Month report displays one period column per planning period (1–12) when grouped by month. Column headers display abbreviated month name and year. |
+| **AC-RPT-BBM-02** | The Total Budget, Budget Target, and Current Year Budget summary columns always reflect the full fiscal year total regardless of the grouping selection. |
+| **AC-RPT-BBM-03** | The Current Year Budget column always reflects the active version for the selected fiscal year, not the user's selected primary version. When they are the same version, the Vs. CY Budget variance is zero. |
+| **AC-RPT-BBM-04** | If no active version exists for the selected fiscal year, the Current Year Budget column is blank and Vs. CY Budget variance columns are null. |
+| **AC-RPT-BBM-05** | Selecting a cost center rollup node in the cost center filter produces rollup rows aggregating all child cost center amounts. Drill-down into individual cost centers is available from rollup rows. |
+| **AC-RPT-BBM-06** | Selecting an account hierarchy group in the row visibility filter shows the group row and all selected child accounts. The group row reflects only selected children. |
+
+## 15.6 Variance Annotations
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-RPT-AN-01** | An annotation created on a row context (cost_center_id + account_code + fiscal_year + version_id) is visible in both the Annual Budget Summary and Budget by Month report for that row context. |
+| **AC-RPT-AN-02** | Creating a second annotation on the same row context updates the existing annotation — no duplicate annotation rows are created. |
+| **AC-RPT-AN-03** | Annotation text exceeding 1,000 characters is rejected with HTTP 422. |
+| **AC-RPT-AN-04** | Deleting an annotation sets annotation_text = null and generates a REPORT_ANNOTATION_DELETED audit event. The obs.report_annotations row is retained. |
+| **AC-RPT-AN-05** | Budget Planning module commentary (obs.budget_lines.commentary) is returned as a read-only field in report API responses and is not writable via any Reporting module endpoint. |
+| **AC-RPT-AN-06** | Users with ALL_READ standard grant see annotation text as read-only. The edit icon is not displayed for these users. |
+
+## 15.7 Saved Filters
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-RPT-SF-01** | A saved filter created by user A is not returned in any API call made by user B. |
+| **AC-RPT-SF-02** | A user may create an unlimited number of saved filters. No quota error is returned regardless of saved filter count. |
+| **AC-RPT-SF-03** | Creating a saved filter with a name that already exists for the same user returns HTTP 409. |
+| **AC-RPT-SF-04** | A saved filter name exceeding 100 characters is rejected with HTTP 422. |
+| **AC-RPT-SF-05** | Applying a saved filter that references a budget version that is now Archived substitutes the active version and displays a warning message to the user. |
+| **AC-RPT-SF-06** | Applying a saved filter that references an unpublished report type displays a warning and does not load the report. |
+| **AC-RPT-SF-07** | Restoring a saved filter populates all filter panel controls with the saved state. The user must explicitly click 'Apply' to reload the report data. |
+
+## 15.8 Excel Export
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-RPT-EX-01** | The Excel export includes all visible rows and all visible columns matching the current filter state at the time of export. |
+| **AC-RPT-EX-02** | Compensation columns are absent from the export for cost centers where the exporting user holds ALL_NONE confidential data grant. |
+| **AC-RPT-EX-03** | The export file name follows the pattern: {report_name}_{cost_center_name}_{fiscal_year}_{YYYYMMDD}.xlsx. |
+| **AC-RPT-EX-04** | The export includes a summary block above the data grid containing the 'Actuals data as of' and 'Budget last set' timestamps. |
+| **AC-RPT-EX-05** | A REPORT_EXPORTED audit event is generated for every export, capturing user_id, report_definition_id, cost_center_ids, fiscal_year, version_id, column_count, row_count, file_name, and exported_at. |
+| **AC-RPT-EX-06** | A single cost center export completes within 10 seconds from API request to file availability. |
+
+# 16. Document Control
+
+| **Version** | **Date** | **Author** | **Change Summary** |
+| --- | --- | --- | --- |
+| 1.0 | Draft | TBD | Initial version — Report List page, report viewer, filter panel (including comparison mode, row visibility, grouping), Annual Budget Summary report type, Budget by Month report type, variance annotations, saved filters, Excel export, report definition authoring minimum requirements, Delta Lake schema additions, audit events, 43 acceptance criteria. Resolves four open reporting questions from Project Context Handoff v2.3. OI-RPT-01 raised. |
+| 1.1 | Draft | TBD | Section 14 Open Items: OI-RPT-01 closed — UX and UI Specification v1.4 issued incorporating the full report definition authoring surface interaction design (Section 7.6: Report Definition Management screen, Report Definition Editor screen, column selection two-panel layout, drag-to-reorder, Default Visible toggles, Save/Publish/Unpublish/Delete flows, unsaved change warning, access control enforcement; AC-UP-RPT-AUTH-01 through AC-UP-RPT-AUTH-18 added to UX spec). Section 7.2 of UX spec updated with Draft badge and ‘Manage Reports’ button. Blocking qualifier on authoring surface implementation superseded. Section 1.1 relationship table updated to current specification versions. Depends-on references and related documents updated. |
+| 1.1 — Full Restatement | Draft | TBD | Full restatement incorporating all content from v1.0 through v1.1. All 16 sections present in full. Section 1.1 relationship table updated to current versions. Section 2 Terminology: Finance Reviewer added. Section 3.1 Access Control table: Finance Reviewer row added. Depends-on references updated to Architecture v3.5, Glossary v1.9, Security v1.3, UX v1.4, Data Integration v1.5. Supersedes all prior versions. |
+| 1.1 — Full Restatement (platform-aligned) | Draft | Claude | Databricks-free platform cascade aligned to Architecture Spec v3.6 (no functional-requirement content changed). Section 12 heading changed from "Delta Lake Schema Additions" to "PostgreSQL Schema Additions" (§12.1 table definitions and §12.2 "No Amendments to Existing Tables" reworded to PostgreSQL). Variance-annotation storage and Section 13 audit-log reference changed to the PostgreSQL obs schema; audit log restated as "PostgreSQL — append-only, enforced by a BEFORE UPDATE OR DELETE trigger." Depends-on and pointers updated to Architecture v3.6, Security v1.4, UX/UI v1.5, Data Integration v1.6. |
+| 1.1 — Full Restatement (errata) | Draft | Claude | Version-reference corrections per Specification Consistency & Errata Report v1.0 (in-place errata; no technical content changed). Active references in the depends-on header, relationship/related-documents lists, and instructional cross-references updated to current versions: System Context and Domain Glossary v1.9 → v1.11; Functional Requirements: Workforce Planning v1.0 → v1.1; Data Integration Specification v1.5 → v1.6; In-Application Notification Mechanism Specification v1.0 → v1.1; Security and Access Control Specification v1.3 → v1.4; UX and UI Specification v1.4 → v1.5; Project Context Handoff v2.3 → v2.4 (as applicable to this document). Historical Document Control rows and open-item resolution narratives describing past events are unchanged. |
+
+**Related Documents**
+
+- OPEX Budgeting System — System Context and Domain Glossary v1.11
+
+- OPEX Budgeting System — Application Architecture Specification v3.6
+
+- OPEX Budgeting System — Security and Access Control Specification v1.4
+
+- OPEX Budgeting System — UX and UI Specification v1.5
+
+- OPEX Budgeting System — Data Integration Specification v1.6
+
+- OPEX Budgeting System — In-Application Notification Mechanism Specification v1.1
+
+- OPEX Budgeting System — Functional Requirements: Budget Planning v1.1
+
+- OPEX Budgeting System — Functional Requirements: Workforce Planning v1.1
+
+- OPEX Budgeting System — Functional Requirements: Finance Approval Workflow v1.2
+
+- OPEX Budgeting System — Project Context Handoff v2.4
+
+OBS_Functional_Requirements_Reporting_v1_1_Full.docx Page of
+
+Page  of

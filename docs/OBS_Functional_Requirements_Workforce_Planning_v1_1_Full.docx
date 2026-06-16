@@ -1,0 +1,698 @@
+OPEX Budgeting System  —  Functional Requirements: Workforce Planning**	CONFIDENTIAL | DRAFT**
+
+**OPEX Budgeting System**
+
+**Functional Requirements: Workforce Planning**
+
+*Version 1.1 — Full Restatement*
+
+*OBS_Functional_Requirements_Workforce_Planning_v1_1_Full.docx*
+
+| **Document title** | **Functional Requirements: Workforce Planning** |
+| --- | --- |
+| **System** | OPEX Budgeting System (OBS) |
+| **Version** | 1.1 — Full Restatement |
+| **Status** | For Review |
+| **Audience** | Development Team, Technical Leads, Project Stakeholders |
+| **Depends on** | OBS Application Architecture Specification v3.6; OBS Security and Access Control Specification v1.4; OBS UX and UI Specification v1.5; OBS Data Integration Specification v1.6; OBS System Context and Domain Glossary v1.11 |
+
+| ***Full Restatement Notice: This document is a full restatement of Functional Requirements: Workforce Planning v1.0. The specification content is complete and unchanged. Only the depends-on references (meta table, Section 1.3 relationship table, Section 13 open items, and related documents list) have been updated to current specification versions. It supersedes the original v1.0 file.*** |
+| --- |
+
+# 1. Purpose and Scope
+
+This document specifies the functional requirements for the Workforce Planning module of the OPEX Budgeting System (OBS). It defines what the system must do — the business rules, data rules, access control behaviours, and acceptance criteria that govern position management, compensation calculations, employee lifecycle events, the transfer workflow, and the derivation of personnel expense budget lines in the Budget Planning module.
+
+This specification resolves the following open items from predecessor documents:
+
+- Budget Planning Functional Requirements v1.1, Section 1.2 — Workforce Planning functional requirements noted as covered in a separate pending specification.
+
+- UX and UI Specification v1.5, Sections 6.1–6.5 — Workforce Planning UI behaviour defined; this document adds the underlying functional and data rules.
+
+- Application Architecture Specification v3.6, Section 3.3 — Calculation service compensation burden and merit increase rules flagged for Workforce Planning specification. Amendment issued — rules now defined in this document.
+
+- Domain Glossary v1.9 — Merit increase definition amended: the global Administrator-configured rate supersedes any per-cost-center owner configuration reference.
+
+All architectural decisions recorded in the Application Architecture Specification v3.6, Security and Access Control Specification v1.4, UX and UI Specification v1.5, Data Integration Specification v1.6, and Budget Planning Functional Requirements v1.1 are final and are not re-litigated here. This document adds functional detail on top of those decisions without contradicting them.
+
+## 1.1 In Scope
+
+- Position management — adding open positions, viewing filled positions imported from the HR admin system.
+
+- Compensation data — base salary, merit increase, salary adjustment, AIPEIP bonus, other bonus, and compensation burden rate calculations.
+
+- Merit increase configuration — global Administrator-configured rate applied to all positions.
+
+- Compensation burden rate configuration — Administrator-configured rates per fiscal year, including salary cap handling for FICA and unemployment tax components.
+
+- Compensation component to expense account mapping — system-level Administrator-configured mapping table.
+
+- Employee lifecycle events — salary adjustment, termination, and retirement with proration rules.
+
+- Transfer workflow — cross-cost-center position transfer with designated approver, expiry, and notification.
+
+- Personnel expense derivation — direct push of Workforce Planning calculations to Budget Planning personnel expense budget lines.
+
+- Headcount derivation for overhead allocation — budgeted headcount including filled and open positions.
+
+- Administration module screens — merit increase rate, burden rates, salary caps, and compensation component mapping.
+
+- PostgreSQL schema additions and API endpoint requirements for all of the above.
+
+## 1.2 Out of Scope
+
+- Finance-side approval workflow — fully specified in Functional Requirements: Finance Approval Workflow v1.2.
+
+- Reporting functional requirements — covered in Functional Requirements: Reporting v1.1.
+
+- HR admin system configuration — the HR system is a read-only data source for OBS. OBS does not write back to the HR system.
+
+- Payroll processing — OBS produces budget figures only; it does not process or transmit payroll data.
+
+- Benefits administration — burden rates represent the employer cost; individual employee benefit elections are not managed in OBS.
+
+## 1.3 Relationship to Other Specifications
+
+| **Document** | **Version** | **Relationship** |
+| --- | --- | --- |
+| System Context and Domain Glossary | v1.9 | Authoritative terminology source. All terms used in this document carry the exact meanings defined there. The merit increase definition was amended by this specification and is now recorded in v1.9. |
+| Application Architecture Specification | v3.6 | Authoritative architecture. API patterns, calculation service dry-run pattern, PostgreSQL schema conventions, and technology choices are final. |
+| Security and Access Control Specification | v1.3 | Authoritative access control model. Confidential data grant controls all Workforce Planning access. |
+| UX and UI Specification | v1.4 | Authoritative UI design. This document adds functional depth to UX Sections 6.1–6.5 without changing any UX decisions. |
+| Data Integration Specification | v1.5 | Authoritative ingestion pipeline. The daily HR admin system import populates position and employee data consumed by this module. |
+| Functional Requirements: Budget Planning | v1.1 | Defines how personnel expense budget lines are consumed. This document defines how they are produced. |
+
+# 2. Terminology
+
+All terms below are defined in the Domain Glossary (OBS_System_Context_and_Domain_Glossary_v1_9.docx). They are listed here as a quick reference for readers of this document. No synonym or alternative phrasing is permitted in code, API contracts, database schemas, UI labels, or documentation.
+
+| **Authoritative Term** | **Definition Summary** |
+| --- | --- |
+| **Position** | The atomic unit of workforce planning. Represents a single filled or open headcount slot in a cost center. Personnel expense budget lines are derived from position records. |
+| **Base Salary** | The annual salary for a position as imported from the HR admin system (for filled positions) or entered by the Administrator or cost center owner (for open positions). Used as the foundation for all compensation calculations. |
+| **Merit Increase** | A globally configured percentage rate set by the Administrator, applied to base salary effective March 1 of the fiscal year. Produces the merit increase amount (base salary × merit rate). Cost center owners wishing to budget a higher increase for a specific employee do so via salary adjustment. |
+| **Salary Adjustment** | An optional additional annual compensation amount entered at the position level. Added on top of base salary plus merit increase. Represents discretionary increases above the global merit rate. |
+| **New Annual Salary** | The total budgeted annual salary for a position: base salary + merit increase amount + salary adjustment. |
+| **Salary Expense** | The monthly or annual budget line amount derived from a position's compensation. January and February use base salary only. March through December use new annual salary. All amounts are prorated by days active in the period. |
+| **AIPEIP Bonus** | Annual Incentive Plan / Employee Incentive Plan bonus. An annual bonus amount entered at the position level. Zeroed completely for terminations; prorated through the retirement effective date for retirements. |
+| **Other Bonus** | A supplemental bonus amount entered at the position level. Not zeroed for terminations or retirements. |
+| **Compensation Burden** | Employer tax and benefit costs calculated on top of base salary. Components include: FICA, Medicare, state and federal income taxes, state and federal unemployment taxes, and other employer-paid benefits. Rates are Administrator-configured per fiscal year as a percentage of salary. FICA and unemployment tax components have a salary cap. |
+| **FTE** | Full-Time Equivalent. A decimal value (e.g., 1.0, 0.5) representing the fraction of a full-time position. Applied as a multiplier in all compensation expense calculations. |
+| **Planning Period** | A single calendar month within a fiscal year. The atomic unit of time for all personnel expense budget lines. |
+| **Fiscal Year** | The twelve-month planning and reporting period. Currently aligned with the calendar year. |
+| **Budgeted Headcount** | The count of positions (filled and open) in a cost center for a given fiscal year, used in overhead allocation calculations. |
+| **Personnel Expense Account** | An expense account flagged by the Administrator as receiving derived workforce planning data. Budget lines for these accounts are read-only in the Budget Planning module. |
+| **Confidential Data Grant** | ALL_WRITE, ALL_READ, or ALL_NONE per cost center. Controls all access to compensation data and Workforce Planning module operations. ALL_WRITE is required to enter or edit compensation data. |
+| **Transfer** | The movement of a position from one cost center to another, subject to a designated approver workflow on the receiving cost center. |
+| **Designated Transfer Approver** | A user designated on the receiving cost center record by the Administrator. Receives transfer approval requests for that cost center. |
+| **Effective Date** | The date on which a lifecycle event (salary adjustment, termination, retirement, transfer) takes effect. For terminations and retirements, this is the last day worked (inclusive). |
+
+**Amendment note — Domain Glossary v1.9 issued: **This specification identified that the Domain Glossary described merit increase as configured per cost center by the cost center owner, which did not match the confirmed design. The correct design is a single global merit increase rate configured by the Administrator, effective March 1 of the fiscal year. Domain Glossary v1.9 (reached via intermediate versions from v1.6) records this amendment along with other new and corrected terms (designated transfer approver, AIPEIP bonus, other bonus, compensation burden components, salary expense, new annual salary formula). No further Glossary action is required.
+
+# 3. Global Configuration — Administration Module
+
+The following configuration items are managed exclusively by Administrators in the Administration module. They apply globally across all cost centers and all positions for the configured fiscal year. System Modelers do not have access to these screens.
+
+## 3.1 Merit Increase Rate
+
+| **Decision: ****A single global merit increase rate is configured by the Administrator per fiscal year. This rate applies uniformly to all positions — filled and open — across all cost centers. There is no per-cost-center or per-position merit rate. Cost center owners who wish to budget a higher increase for a specific position do so via the salary adjustment field.** |
+| --- |
+
+Merit increase rate configuration rules:
+
+- The merit increase rate is expressed as a percentage (e.g., 3.00 for 3%).
+
+- One rate per fiscal year. The Administrator sets or updates the rate in the Merit Increase Rate administration screen.
+
+- The rate may be updated at any time. Updating the rate immediately triggers a recalculation of all Workforce Planning compensation figures for the affected fiscal year and a direct push update to all affected personnel expense budget lines.
+
+- A rate of 0.00% is valid and means no merit increase is applied for that fiscal year.
+
+- Merit increase is effective March 1 of the fiscal year. January and February salary expense is calculated using base salary only. March through December use new annual salary (base salary + merit increase amount + salary adjustment).
+
+| **Claude Code Note — Merit increase rate schema** | **obs.merit_increase_rates table:   rate_id        STRING NOT NULL (generated UUID)   fiscal_year    INT NOT NULL   rate_pct       DECIMAL(6,4) NOT NULL  -- e.g., 3.0000 = 3%   effective_date DATE NOT NULL DEFAULT CAST(fiscal_year ││ ****'****-03-01****'**** AS DATE)   updated_at     TIMESTAMP, updated_by STRING   PRIMARY KEY (fiscal_year) GET  /api/v1/merit-increase-rates/{fiscal_year} PUT  /api/v1/merit-increase-rates/{fiscal_year}      Body: { rate_pct: decimal }      On save: trigger recalculation of all workforce planning salary expense for fiscal_year.      Write audit event MERIT_RATE_UPDATED: fiscal_year, old_rate_pct, new_rate_pct, user_id, timestamp.      Administrator only — return HTTP 403 for all other callers.** |
+| --- | --- |
+
+## 3.2 Compensation Burden Rates
+
+| **Decision: ****Compensation burden rates are configured by the Administrator per fiscal year. All rates are expressed as a percentage of salary. FICA and unemployment tax components have a salary cap entered in the same administration screen. Rates do not carry forward automatically — they must be set for each fiscal year.** |
+| --- |
+
+Compensation burden components:
+
+| **Burden Component** | **Rate Field** | **Salary Cap Field** | **Notes** |
+| --- | --- | --- | --- |
+| **FICA (Social Security)** | fica_rate_pct | fica_wage_cap | Cap is the annual wage base. Burden applies only on salary up to the cap. |
+| **Medicare** | medicare_rate_pct | None | No salary cap. Applied on full salary. |
+| **State Income Tax (Employer)** | state_income_tax_rate_pct | None | No salary cap. Applied on full salary. |
+| **Federal Income Tax (Employer)** | federal_income_tax_rate_pct | None | No salary cap. Applied on full salary. |
+| **State Unemployment Tax (SUTA)** | suta_rate_pct | suta_wage_cap | Cap is the annual state unemployment wage base. |
+| **Federal Unemployment Tax (FUTA)** | futa_rate_pct | futa_wage_cap | Cap is the annual federal unemployment wage base. |
+| **Other Employer-Paid Benefits** | other_benefits_rate_pct | None | Catch-all for additional employer costs (e.g., 401k match, workers comp). No cap. |
+
+Salary cap calculation rule: for burden components with a salary cap, the burdened salary used in the rate calculation is MIN(annual_salary, wage_cap), where annual_salary is the position's new annual salary and wage_cap is the configured salary cap for that component. The burden amount for capped components is: rate_pct × MIN(new_annual_salary, wage_cap).
+
+| **Claude Code Note — Compensation burden rate schema** | **obs.compensation_burden_rates table:   rate_id                     STRING NOT NULL (generated UUID)   fiscal_year                 INT NOT NULL   fica_rate_pct               DECIMAL(6,4) NOT NULL   fica_wage_cap               DECIMAL(12,2) NOT NULL   medicare_rate_pct           DECIMAL(6,4) NOT NULL   state_income_tax_rate_pct   DECIMAL(6,4) NOT NULL   federal_income_tax_rate_pct DECIMAL(6,4) NOT NULL   suta_rate_pct               DECIMAL(6,4) NOT NULL   suta_wage_cap               DECIMAL(12,2) NOT NULL   futa_rate_pct               DECIMAL(6,4) NOT NULL   futa_wage_cap               DECIMAL(12,2) NOT NULL   other_benefits_rate_pct     DECIMAL(6,4) NOT NULL   updated_at TIMESTAMP, updated_by STRING   PRIMARY KEY (fiscal_year) GET /api/v1/compensation-burden-rates/{fiscal_year} PUT /api/v1/compensation-burden-rates/{fiscal_year}     Body: { all rate and cap fields }     On save: trigger recalculation of all burden expense figures for fiscal_year.     Write audit event BURDEN_RATES_UPDATED: fiscal_year, old_rates (JSON), new_rates (JSON), user_id, timestamp.     Administrator only — return HTTP 403 for all other callers.** |
+| --- | --- |
+
+## 3.3 Compensation Component to Expense Account Mapping
+
+| **Decision: ****Each compensation component maps to a single expense account system-wide. The mapping is a system-level configuration table managed exclusively by the Administrator. One global mapping applies to all cost centers — there is no per-cost-center override.** |
+| --- |
+
+Mappable compensation components:
+
+| **Compensation Component** | **Maps to Expense Account** |
+| --- | --- |
+| **Salary Expense** | One expense account (flagged as personnel expense account, source = 'salary') |
+| **AIPEIP Bonus** | One expense account (flagged as personnel expense account, source = 'aipeip_bonus') |
+| **Other Bonus** | One expense account (flagged as personnel expense account, source = 'other_bonus') |
+| **FICA Burden** | One expense account (flagged as personnel expense account, source = 'burden_fica') |
+| **Medicare Burden** | One expense account (flagged as personnel expense account, source = 'burden_medicare') |
+| **State Income Tax Burden** | One expense account (flagged as personnel expense account, source = 'burden_state_income_tax') |
+| **Federal Income Tax Burden** | One expense account (flagged as personnel expense account, source = 'burden_federal_income_tax') |
+| **SUTA Burden** | One expense account (flagged as personnel expense account, source = 'burden_suta') |
+| **FUTA Burden** | One expense account (flagged as personnel expense account, source = 'burden_futa') |
+| **Other Benefits Burden** | One expense account (flagged as personnel expense account, source = 'burden_other_benefits') |
+
+Configuration rules:
+
+- Each compensation component must be mapped to exactly one active expense account before Workforce Planning calculations can produce budget lines.
+
+- The target expense account must exist in obs.account_hierarchy_nodes as an active leaf-level account and must be flagged as a personnel expense account (is_personnel_expense = TRUE).
+
+- The Administrator sets or updates mappings in the Compensation Component Mapping administration screen.
+
+- Changing a mapping triggers a direct push recalculation for all open fiscal years, rerouting future budget line writes to the newly mapped account.
+
+| **Claude Code Note — Compensation component mapping schema** | **obs.compensation_component_mappings table:   mapping_id       STRING NOT NULL (generated UUID)   component_code   STRING NOT NULL  -- e.g., ****'****salary****'****, ****'****aipeip_bonus****'****, ****'****burden_fica****'****   account_code     STRING NOT NULL  -- FK to obs.account_hierarchy_nodes   updated_at TIMESTAMP, updated_by STRING   PRIMARY KEY (component_code) Also add to obs.account_hierarchy_nodes:   is_personnel_expense BOOLEAN NOT NULL DEFAULT FALSE   personnel_expense_source STRING  -- nullable; component_code value if is_personnel_expense = TRUE GET /api/v1/compensation-component-mappings PUT /api/v1/compensation-component-mappings     Body: array of { component_code, account_code }     Validate: account_code must exist and have is_personnel_expense = TRUE.     Write audit event COMPENSATION_MAPPING_UPDATED per changed component:       component_code, old_account_code, new_account_code, user_id, timestamp.     Administrator only — return HTTP 403 for all other callers.** |
+| --- | --- |
+
+## 3.4 Transfer Approver Configuration
+
+The designated transfer approver for each cost center is a field on the cost center record, set by the Administrator. This user receives approval requests when a position transfer to their cost center is initiated.
+
+- The designated transfer approver must be an active OBS user. The Administrator selects the approver from the user directory when creating or editing a cost center record.
+
+- A cost center without a designated transfer approver may not receive transfers. The API returns HTTP 409 if a transfer is initiated to a receiving cost center with no designated approver configured.
+
+- The designated transfer approver field is nullable — it is set to null for cost centers that will not receive transfers.
+
+| **Claude Code Note — Transfer approver configuration** | **Add to obs.cost_center_hierarchy_nodes:   transfer_approver_user_id STRING (nullable) -- FK to obs.users This field is managed via the existing cost center management screen (Budget Planning FR v1.1 Section 12.4). No new table required.** |
+| --- | --- |
+
+# 4. Position Management
+
+A position is the atomic unit of workforce planning. Each position belongs to exactly one cost center and one fiscal year. Positions may be filled (populated from the HR admin system daily import) or open (entered manually by cost center owners or Administrators).
+
+## 4.1 Access Control
+
+All Workforce Planning module operations are governed by the confidential data grant. The standard permission grant does not apply to this module.
+
+| **User / Grant** | **Permitted Operations** |
+| --- | --- |
+| **Administrator** | Full read and write access to all positions in all cost centers. May add open positions, perform all lifecycle events, configure all global rates, and manage the transfer workflow. |
+| **ALL_WRITE confidential data grant** | Read and write access to positions in the cost centers to which this grant applies. May add open positions, enter and edit compensation data, perform salary adjustments, initiate terminations/retirements, and initiate transfers. |
+| **ALL_READ confidential data grant** | Read-only access to compensation and position data for the applicable cost centers. No create, edit, or lifecycle event operations permitted. |
+| **ALL_NONE confidential data grant** | No access to the Workforce Planning module for the applicable cost centers. The module is not rendered for these cost centers. |
+| **System Modeler / Report Developer** | No Workforce Planning module access. These capability flags do not grant access to compensation data. |
+
+## 4.2 Filled Positions — HR Import
+
+Filled positions are populated from the daily HR admin system import (Data Integration Specification v1.6). The import creates or updates position records in obs.positions based on the employee data received. The following rules govern how import data interacts with Workforce Planning:
+
+- The daily HR import updates employee base salary, job title, cost center assignment, state of residence, and employment status.
+
+- The import does not automatically trigger a recalculation of Workforce Planning budget lines. Cost center owners are responsible for reviewing imported changes and determining whether any Workforce Planning adjustments are needed.
+
+- If an employee is terminated in the HR system and the termination is reflected in the daily import, no automatic change is made to the position record in OBS. Any adjustment (such as recording a termination lifecycle event) must be performed manually by the cost center owner or Administrator.
+
+- The HR import is the authoritative source for base salary on filled positions. Cost center owners may not directly edit the base salary field for filled positions — it is read-only. Salary adjustments above the base salary are entered via the salary adjustment lifecycle event.
+
+- FTE is imported from the HR system and is read-only for filled positions.
+
+## 4.3 Open Positions
+
+Open positions represent planned hires. They are entered manually by users with ALL_WRITE confidential data grant or by Administrators.
+
+Open position entry rules:
+
+- The following fields are required when adding an open position: cost center, fiscal year, job title, base salary, FTE, and planned start date.
+
+- Base salary for open positions is treated identically to imported base salary for all calculation purposes — merit increase, compensation burden, and proration all apply.
+
+- FTE for open positions is entered by the cost center owner and may be any positive decimal value up to 1.0.
+
+- Planned start date determines when salary expense begins. Salary expense is zero for all months prior to the planned start date. The start month is prorated by days active.
+
+- Open positions do not have an associated employee record. They are identified by a system-generated position_id and a job title.
+
+- An open position may be converted to a filled position when the HR import brings in a matching new hire. This linkage is manual — the Administrator or cost center owner associates the new hire with the open position record. If not linked, both records coexist.
+
+| **Claude Code Note — obs.positions table** | **obs.positions table (new table — core position record):   position_id        STRING NOT NULL (generated UUID)   fiscal_year        INT NOT NULL   cost_center_id     STRING NOT NULL  -- FK to obs.cost_center_hierarchy_nodes   employee_id        STRING (nullable) -- FK to obs.employees; null for open positions   job_title          STRING NOT NULL (max 200 chars)   position_type      ENUM(****'****filled****'****,****'****open****'****) NOT NULL   base_salary        DECIMAL(12,2) NOT NULL   fte                DECIMAL(4,2) NOT NULL  -- e.g., 1.00, 0.50   start_date         DATE NOT NULL   end_date           DATE (nullable) -- set on termination or retirement   status             ENUM(****'****active****'****,****'****terminated****'****,****'****retired****'****,****'****transferred_out****'****) NOT NULL DEFAULT ****'****active****'****   salary_adjustment  DECIMAL(12,2) NOT NULL DEFAULT 0.00   aipeip_bonus       DECIMAL(12,2) NOT NULL DEFAULT 0.00   other_bonus        DECIMAL(12,2) NOT NULL DEFAULT 0.00   state_code         STRING (nullable) -- used for overhead allocation geography match   created_at TIMESTAMP, updated_at TIMESTAMP, created_by STRING, updated_by STRING   PRIMARY KEY (position_id) POST /api/v1/positions  -- create open position      Body: { cost_center_id, fiscal_year, job_title, base_salary, fte, start_date,              aipeip_bonus?, other_bonus? }      position_type = ****'****open****'****, status = ****'****active****'****      Returns HTTP 201 with position record.      Write POSITION_CREATED audit event.      Trigger personnel expense budget line recalculation after save. GET /api/v1/positions?cost_center_id={id}****&****fiscal_year={year}     Returns all positions for the cost center and fiscal year.     Requires ALL_READ or ALL_WRITE confidential data grant, or Administrator.** |
+| --- | --- |
+
+# 5. Compensation Calculation Rules
+
+This section defines the authoritative business rules for all compensation calculations. The calculation service (Application Architecture Specification v3.6 Section 3.3) implements these rules. All calculations are performed server-side. The frontend never independently derives compensation figures.
+
+## 5.1 Salary Expense Calculation
+
+| **Decision: ****Salary Expense is calculated monthly, prorated by days active within each planning period. January and February use base salary only. March through December use new annual salary (base salary + merit increase amount + salary adjustment).** |
+| --- |
+
+**Step 1 — Merit Increase Amount:**
+
+| **merit_increase_amount = base_salary × (merit_rate_pct / 100)** |
+| --- |
+
+**Step 2 — New Annual Salary:**
+
+| **new_annual_salary = base_salary + merit_increase_amount + salary_adjustment** |
+| --- |
+
+**Step 3 — Monthly Salary Expense:**
+
+For each planning period (month) m:
+
+- Determine days_active_in_month: the number of calendar days the position is active within month m (from MAX(start_date, first_day_of_month) to MIN(end_date, last_day_of_month), inclusive).
+
+- If days_active_in_month ≤ 0, salary_expense_month_m = 0.00.
+
+- days_in_month = total calendar days in month m.
+
+- proration_factor = days_active_in_month / days_in_month.
+
+- If m ∈ {1, 2} (January, February): monthly_rate = base_salary / 12.
+
+- If m ∈ {3, 4, ..., 12} (March through December): monthly_rate = new_annual_salary / 12.
+
+- salary_expense_month_m = monthly_rate × fte × proration_factor.
+
+- Round to two decimal places.
+
+Proration examples:
+
+- Start date 10/1: October days_active = 31, days_in_month = 31, proration_factor = 1.00 (full month).
+
+- Start date 10/15: October days_active = 17 (15th through 31st inclusive), days_in_month = 31, proration_factor = 17/31.
+
+- Termination date 10/15 (last day worked): October days_active = 15 (1st through 15th inclusive), proration_factor = 15/31.
+
+## 5.2 Bonus Expense Calculation
+
+Bonus amounts (AIPEIP Bonus and Other Bonus) are entered as annual amounts at the position level. The monthly budget line amount for each bonus is the annual amount divided by 12, subject to lifecycle event rules (Section 7).
+
+- monthly_aipeip_expense = (aipeip_bonus / 12) × fte, for each month the position is active (subject to termination/retirement zeroing rules — see Section 6).
+
+- monthly_other_bonus_expense = (other_bonus / 12) × fte, for each month the position is active.
+
+- Bonus amounts are not prorated by days within the month, except for the AIPEIP retirement proration described in Section 6.3.
+
+- Months prior to the position start date and after the position end date show zero for both bonus types.
+
+## 5.3 Compensation Burden Calculation
+
+| **Decision: ****Compensation burden is calculated as a percentage of new annual salary, applied per fiscal year using the Administrator-configured rates. FICA and unemployment tax components apply rates against the lower of new annual salary or the configured salary cap.** |
+| --- |
+
+For each burden component c:
+
+- If the component has a salary cap (FICA, SUTA, FUTA): burdened_salary_c = MIN(new_annual_salary, wage_cap_c)
+
+- If the component has no salary cap (Medicare, state income tax, federal income tax, other benefits): burdened_salary_c = new_annual_salary
+
+Annual burden amount for component c:
+
+| **annual_burden_c = burdened_salary_c × (rate_pct_c / 100) × fte** |
+| --- |
+
+Monthly burden amount for component c in month m:
+
+| **monthly_burden_c_m = (annual_burden_c / 12) × proration_factor_m** |
+| --- |
+
+where proration_factor_m is the same days-active proration factor used in salary expense (Section 5.1). Round each component's monthly amount to two decimal places.
+
+Each burden component maps to a separate expense account via the compensation component mapping (Section 3.3). Each component's monthly amount is pushed as a separate budget line.
+
+## 5.4 Calculation Service Dry-Run Pattern
+
+Consistent with the Application Architecture Specification v3.6 Section 3.3 dry-run pattern, the calculation service exposes separate endpoints for calculation (dry-run) and persistence. The frontend uses the dry-run endpoint to display recalculated figures immediately when any input changes, before the user explicitly saves.
+
+| **Claude Code Note — Workforce Planning calculation API** | **POST /api/v1/workforce-planning/calculate (dry-run — no persistence)      Body: {        cost_center_id, fiscal_year,        positions: [ { position_id, base_salary, salary_adjustment, aipeip_bonus,                       other_bonus, fte, start_date, end_date } ]      }      Returns: {        positions: [ {          position_id,          monthly_salary:   [ { period: 1..12, amount: decimal } ],          monthly_aipeip:   [ { period: 1..12, amount: decimal } ],          monthly_bonus:    [ { period: 1..12, amount: decimal } ],          monthly_burden:   [ { component_code, period: 1..12, amount: decimal } ]        } ]      }      Does not write to the database. No audit event. POST /api/v1/workforce-planning/save (persists and triggers budget line push)      Same body as /calculate.      Saves to obs.positions and triggers direct push to obs.budget_lines.      Write WORKFORCE_PLAN_SAVED audit event.      Requires ALL_WRITE confidential data grant or Administrator.** |
+| --- | --- |
+
+# 6. Employee Lifecycle Events
+
+Lifecycle events modify the active state or compensation of a position. Each lifecycle event is recorded via a row action menu on the headcount grid (UX and UI Specification v1.5 Section 6.3). The three supported row actions are: Salary Adjustment, Terminate/Retire, and Transfer. No other row actions exist.
+
+## 6.1 Salary Adjustment
+
+A salary adjustment records a discretionary compensation increase for a position above the global merit rate. It is entered as an annual dollar amount in the salary adjustment column of the headcount grid.
+
+- The salary adjustment is added to base salary plus merit increase amount to derive new annual salary: new_annual_salary = base_salary + merit_increase_amount + salary_adjustment.
+
+- A salary adjustment may be entered at any time. Changes take effect immediately upon save.
+
+- A salary adjustment of zero means no adjustment is applied. This is the default for all positions.
+
+- The salary adjustment column is editable for users with ALL_WRITE confidential data grant and for Administrators.
+
+- Saving a salary adjustment triggers a full recalculation of salary expense, burden expense, and a direct push to affected budget lines.
+
+| **Claude Code Note — Salary adjustment API** | **PATCH /api/v1/positions/{position_id}/salary-adjustment       Body: { salary_adjustment: decimal, effective_date: date }       Updates obs.positions.salary_adjustment.       Triggers recalculation and direct push to obs.budget_lines.       Write audit event SALARY_ADJUSTMENT_RECORDED:         position_id, cost_center_id, fiscal_year, old_salary_adjustment,         new_salary_adjustment, effective_date, user_id, timestamp.       Requires ALL_WRITE confidential data grant or Administrator.** |
+| --- | --- |
+
+## 6.2 Termination
+
+A termination records the last day worked for a position. The effective date is inclusive — the employee is active through and including the termination date.
+
+**Termination rules:**
+
+- Salary expense is prorated through the termination effective date. For the termination month: days_active = termination_day_number (days from the 1st through the termination date, inclusive). Months after the termination month show zero salary expense.
+
+- AIPEIP Bonus is zeroed completely — no AIPEIP bonus is recorded in any month of the fiscal year for a terminated position.
+
+- Other Bonus amounts are not zeroed. The full other_bonus amount remains as entered for all active months.
+
+- Compensation burden follows the same proration as salary expense.
+
+- The position status is set to 'terminated' and the end_date is set to the effective date.
+
+- A terminated position remains visible in the headcount grid in read-only mode for the remainder of the fiscal year.
+
+| **Claude Code Note — Termination API** | **POST /api/v1/positions/{position_id}/terminate      Body: { effective_date: date }      Validates: effective_date ****>****= position.start_date and ****<****= last day of fiscal_year.      Sets obs.positions.status = ****'****terminated****'****, end_date = effective_date.      Sets obs.positions.aipeip_bonus = 0.00 (zeroed for all periods).      Triggers full recalculation and direct push to obs.budget_lines.      Write audit event POSITION_TERMINATED:        position_id, cost_center_id, fiscal_year, effective_date, user_id, timestamp.      Requires ALL_WRITE confidential data grant or Administrator.** |
+| --- | --- |
+
+## 6.3 Retirement
+
+A retirement records the last day worked for a position. The effective date is inclusive — the employee is active through and including the retirement date. Retirement differs from termination in AIPEIP Bonus treatment.
+
+**Retirement rules:**
+
+- Salary expense is prorated through the retirement effective date using the same proration logic as termination (Section 6.2).
+
+- AIPEIP Bonus for months prior to the retirement month retains the full monthly amount (aipeip_bonus / 12 × fte).
+
+- AIPEIP Bonus for the retirement month is prorated: (aipeip_bonus / 12 × fte) × (days_active_in_retirement_month / days_in_retirement_month), where days_active_in_retirement_month is the number of calendar days from the 1st through the retirement date, inclusive.
+
+- AIPEIP Bonus for months after the retirement month is zero.
+
+- Other Bonus amounts are not zeroed and are not prorated by the retirement date.
+
+- Compensation burden follows the same proration as salary expense.
+
+- The position status is set to 'retired' and the end_date is set to the effective date.
+
+- A retired position remains visible in the headcount grid in read-only mode.
+
+| **Claude Code Note — Retirement API** | **POST /api/v1/positions/{position_id}/retire      Body: { effective_date: date }      Validates: effective_date ****>****= position.start_date and ****<****= last day of fiscal_year.      Sets obs.positions.status = ****'****retired****'****, end_date = effective_date.      Does NOT zero aipeip_bonus field — proration is computed in calculation service.      Triggers full recalculation (AIPEIP prorated per retirement month rules) and      direct push to obs.budget_lines.      Write audit event POSITION_RETIRED:        position_id, cost_center_id, fiscal_year, effective_date, user_id, timestamp.      Requires ALL_WRITE confidential data grant or Administrator.** |
+| --- | --- |
+
+# 7. Transfer Workflow
+
+A transfer moves a position from a sending cost center to a receiving cost center. Transfers are subject to a designated approver workflow. The transfer does not take effect until approved by the designated transfer approver of the receiving cost center.
+
+## 7.1 Transfer Initiation
+
+- A user with ALL_WRITE confidential data grant on the sending cost center, or an Administrator, may initiate a transfer via the Transfer row action on the headcount grid.
+
+- The initiating user selects the receiving cost center from the cost center selector. Only cost centers with a configured designated transfer approver are available as transfer destinations.
+
+- The initiating user enters an effective date for the transfer.
+
+- Upon initiation, a transfer request record is created with status 'pending'. The position record is not modified at this point.
+
+- The designated transfer approver of the receiving cost center receives an in-application notification of the pending transfer request.
+
+- While a transfer is pending, the position is displayed in the sending cost center's headcount grid with a 'Transfer Pending' status indicator. No other lifecycle events may be initiated on the position while a transfer is pending.
+
+## 7.2 Transfer Approval
+
+- The designated transfer approver of the receiving cost center may approve or reject the transfer request via the in-application notification.
+
+- Approval: the position record is updated — cost_center_id is set to the receiving cost center, status returns to 'active'. A full recalculation is triggered for both the sending and receiving cost centers, and budget lines are updated via direct push.
+
+- Rejection: the transfer request record is set to status 'rejected'. The position remains unchanged in the sending cost center. The initiating user receives an in-application notification of the rejection.
+
+## 7.3 Transfer Expiry
+
+- A pending transfer request automatically expires 3 calendar days after initiation if no action is taken by the designated transfer approver.
+
+- On expiry, the transfer request record is set to status 'expired'. The position remains unchanged in the sending cost center — identical behaviour to a rejection.
+
+- The initiating cost center owner receives an in-application notification of the expiry.
+
+- Expiry is evaluated by a scheduled background job. Expired transfer requests generate audit event TRANSFER_EXPIRED.
+
+## 7.4 Transfer State Machine
+
+| **From Status** | **To Status** | **Who / Trigger** | **Effect** |
+| --- | --- | --- | --- |
+| — | Pending | Initiating cost center owner or Administrator | Transfer request created. Notification sent to receiving cost center designated approver. |
+| Pending | Approved | Designated transfer approver of receiving cost center | Position moved to receiving cost center. Budget lines updated for both cost centers. |
+| Pending | Rejected | Designated transfer approver of receiving cost center | Position unchanged. Initiating user notified. |
+| Pending | Expired | Scheduled background job (3-day expiry) | Same as rejection. Initiating user notified. |
+
+| **Claude Code Note — obs.position_transfers table and transfer API** | **obs.position_transfers table:   transfer_id           STRING NOT NULL (generated UUID)   position_id           STRING NOT NULL  -- FK to obs.positions   sending_cost_center_id   STRING NOT NULL   receiving_cost_center_id STRING NOT NULL   effective_date        DATE NOT NULL   status                ENUM(****'****pending****'****,****'****approved****'****,****'****rejected****'****,****'****expired****'****) NOT NULL DEFAULT ****'****pending****'****   initiated_by          STRING NOT NULL  -- user_id   initiated_at          TIMESTAMP NOT NULL   actioned_by           STRING (nullable)  -- approver user_id   actioned_at           TIMESTAMP (nullable)   expires_at            TIMESTAMP NOT NULL  -- initiated_at + 3 days   PRIMARY KEY (transfer_id) POST /api/v1/positions/{position_id}/transfer      Body: { receiving_cost_center_id, effective_date }      Validates: receiving cost center has transfer_approver_user_id configured.      Validates: no other transfer is pending for this position_id.      Creates transfer record, sets expires_at = NOW() + 3 days.      Sends in-app notification to transfer_approver_user_id (Notification Spec v1.0).      Write TRANSFER_INITIATED audit event. POST /api/v1/transfers/{transfer_id}/approve POST /api/v1/transfers/{transfer_id}/reject      Caller must be the designated transfer_approver_user_id for the receiving cost center.      Approve: updates obs.positions.cost_center_id, triggers recalculation and direct push.      Reject:  sets transfer status = ****'****rejected****'****, sends notification to initiating user.      Write TRANSFER_APPROVED or TRANSFER_REJECTED audit event. Background job ****'****transfer_expiry_check****'**** runs every hour:      Sets status = ****'****expired****'**** where status = ****'****pending****'**** and expires_at ****<**** NOW().      Sends in-app notification to initiated_by user (Notification Spec v1.0).      Write TRANSFER_EXPIRED audit event.** |
+| --- | --- |
+
+# 8. Personnel Expense Derivation — Budget Planning Integration
+
+Personnel expense budget lines in the Budget Planning module are derived exclusively from Workforce Planning position records. Users may not directly enter or edit these budget lines in the Budget Planning module. This section defines how Workforce Planning data is translated into budget lines.
+
+## 8.1 Direct Push Mechanism
+
+| **Decision: ****Saving any Workforce Planning data — position creation, compensation edit, salary adjustment, termination, retirement, or approved transfer — immediately triggers a recalculation and direct push update to the affected personnel expense budget lines in obs.budget_lines. There is no batch delay. The push is synchronous within the save API call.** |
+| --- |
+
+- The push updates all affected planning periods (months 1–12) for the fiscal year.
+
+- Each compensation component (salary, AIPEIP bonus, other bonus, and each burden component) is written as a separate budget line to the account specified in the compensation component mapping (Section 3.3).
+
+- Budget lines generated by the push are stored in obs.budget_lines with is_calculated = TRUE and source = 'workforce_planning'.
+
+- The push also updates the budgeted headcount for the cost center, which feeds the overhead allocation recalculation.
+
+- If a compensation component mapping is not configured for a component, the push skips that component and records a warning in the application log. The save operation completes for all mapped components.
+
+| **Claude Code Note — Personnel expense budget line write** | **Internal calculation service — not a user-facing API:   For each position in the cost center:     For each planning period m (1..12):       For each compensation component c:         Compute amount_c_m per Section 5 rules.         Lookup account_code from obs.compensation_component_mappings where component_code = c.         Upsert obs.budget_lines:           { version_id (active version), cost_center_id, account_code, fiscal_year,             period_number = m, amount = amount_c_m,             is_calculated = TRUE, source = ****'****workforce_planning****'**** }         ON CONFLICT (version_id, cost_center_id, account_code, fiscal_year, period_number)         DO UPDATE SET amount = EXCLUDED.amount, updated_at = NOW().   Write WORKFORCE_PLAN_SAVED audit event after all upserts complete. Note: Personnel expense budget lines are written to the ACTIVE budget version only. Non-active versions are not automatically updated.** |
+| --- | --- |
+
+## 8.2 Headcount for Overhead Allocation
+
+The overhead allocation calculation (Budget Planning Functional Requirements v1.1 Section 7.2) uses budgeted headcount derived from Workforce Planning position records.
+
+- Budgeted headcount = count of all active positions (filled and open) in the cost center for the fiscal year, as of the first day of the planning period.
+
+- A position is counted for a planning period if its start_date is on or before the first day of that period and its end_date is null or after the first day of that period.
+
+- Open positions count toward budgeted headcount.
+
+- Terminated and retired positions are excluded from headcount for periods after their end_date.
+
+- When a Workforce Planning save triggers a direct push to budget lines, the overhead allocation for the affected cost center is also recalculated.
+
+# 9. Administration Module — Workforce Planning Screens
+
+The following screens are accessible only to Administrators in the Administration module (UX and UI Specification v1.5 Section 8).
+
+## 9.1 Merit Increase Rate Screen
+
+- Displays the configured merit increase rate for each fiscal year in a grid.
+
+- One editable row per fiscal year. The Administrator enters the rate as a percentage (e.g., 3.00).
+
+- Inline editing — changes auto-save on blur, consistent with Administration module interaction patterns (UX spec Section 8).
+
+- Saving triggers immediate recalculation of all Workforce Planning salary expense figures for the affected fiscal year and direct push to budget lines.
+
+- Displays: fiscal year, merit rate (%), effective date (always March 1 of the fiscal year), last updated by, last updated at.
+
+## 9.2 Compensation Burden Rates Screen
+
+- Displays all compensation burden rate components for the selected fiscal year.
+
+- One row per burden component. Editable columns: rate (%), wage cap ($) where applicable.
+
+- Inline editing — changes auto-save on blur.
+
+- Saving triggers immediate recalculation of all burden expense figures for the fiscal year and direct push to budget lines.
+
+- A fiscal year selector allows the Administrator to navigate between years. Rates must be configured for each fiscal year independently.
+
+## 9.3 Compensation Component Mapping Screen
+
+- Displays the mapping between each compensation component and its target expense account.
+
+- One row per component. The account_code field is an editable dropdown populated from active leaf-level personnel expense accounts.
+
+- Inline editing — changes auto-save on blur.
+
+- Saving triggers immediate recalculation and re-routing of budget line pushes to the newly mapped account.
+
+# 10. PostgreSQL Schema Additions
+
+This section consolidates all new PostgreSQL tables and column additions required by this specification. Existing schemas defined in prior specifications are not repeated — only additions and amendments are listed.
+
+## 10.1 New Tables
+
+| **Table** | **Purpose** |
+| --- | --- |
+| **obs.positions** | Core position record for all filled and open positions. Defined in Section 4.3. |
+| **obs.position_transfers** | Transfer workflow state. Defined in Section 7.4. |
+| **obs.merit_increase_rates** | Global merit increase rate per fiscal year. Defined in Section 3.1. |
+| **obs.compensation_burden_rates** | Compensation burden rates and salary caps per fiscal year. Defined in Section 3.2. |
+| **obs.compensation_component_mappings** | System-level mapping from compensation components to expense accounts. Defined in Section 3.3. |
+
+## 10.2 Amendments to Existing Tables
+
+| **Table** | **Column Addition** | **Detail** |
+| --- | --- | --- |
+| **obs.budget_lines** | source amended | Add 'workforce_planning' to source ENUM. Existing values: 'user_entry', 'overhead_allocation'. Defined in Budget Planning FR v1.1 Section 13.2. |
+| **obs.cost_center_hierarchy_nodes** | transfer_approver_user_id STRING (nullable) | FK to obs.users. Designates the approver for incoming transfer requests. Defined in Section 3.4. |
+| **obs.account_hierarchy_nodes** | is_personnel_expense BOOLEAN NOT NULL DEFAULT FALSE | Flags the account as a personnel expense account. Budget Planning read-only enforcement applies. Defined in Section 3.3. |
+| **obs.account_hierarchy_nodes** | personnel_expense_source STRING (nullable) | The component_code value indicating which compensation component maps to this account. Nullable — set only when is_personnel_expense = TRUE. |
+
+# 11. Audit Events
+
+All events below are written to the OBS audit log (PostgreSQL — append-only, enforced by a BEFORE UPDATE OR DELETE trigger). All events capture a minimum of: event_type, user_id, timestamp, and the entity IDs listed per event. The audit log schema is defined in the Security and Access Control Specification v1.4.
+
+| **Event Type** | **Additional Captured Fields** |
+| --- | --- |
+| **POSITION_CREATED** | position_id, cost_center_id, fiscal_year, position_type ('filled'│'open'), job_title, base_salary, fte, start_date |
+| **SALARY_ADJUSTMENT_RECORDED** | position_id, cost_center_id, fiscal_year, old_salary_adjustment, new_salary_adjustment, effective_date |
+| **POSITION_TERMINATED** | position_id, cost_center_id, fiscal_year, effective_date |
+| **POSITION_RETIRED** | position_id, cost_center_id, fiscal_year, effective_date |
+| **TRANSFER_INITIATED** | transfer_id, position_id, sending_cost_center_id, receiving_cost_center_id, effective_date, initiated_by |
+| **TRANSFER_APPROVED** | transfer_id, position_id, sending_cost_center_id, receiving_cost_center_id, actioned_by |
+| **TRANSFER_REJECTED** | transfer_id, position_id, sending_cost_center_id, receiving_cost_center_id, actioned_by |
+| **TRANSFER_EXPIRED** | transfer_id, position_id, sending_cost_center_id, receiving_cost_center_id, expires_at |
+| **MERIT_RATE_UPDATED** | fiscal_year, old_rate_pct, new_rate_pct |
+| **BURDEN_RATES_UPDATED** | fiscal_year, old_rates (JSON snapshot), new_rates (JSON snapshot) |
+| **COMPENSATION_MAPPING_UPDATED** | component_code, old_account_code, new_account_code |
+| **WORKFORCE_PLAN_SAVED** | cost_center_id, fiscal_year, version_id, position_count, period_count |
+
+# 12. Acceptance Criteria
+
+Each criterion below must be verified by automated test or documented manual test procedure before the Workforce Planning module is considered complete. UX acceptance criteria from the UX and UI Specification v1.5 Section 6 remain in force and are not repeated here.
+
+## 12.1 Global Configuration
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-WP-CFG-01** | Only Administrator tokens may create or update merit increase rates, compensation burden rates, and compensation component mappings. Non-Administrator write attempts return HTTP 403. |
+| **AC-WP-CFG-02** | A merit increase rate of 0.00% is accepted and stored. Salary expense for all positions in the fiscal year is calculated using base salary only (no merit increase applied). |
+| **AC-WP-CFG-03** | Updating the merit increase rate immediately triggers a recalculation of all salary expense budget lines for the affected fiscal year and a direct push to obs.budget_lines. |
+| **AC-WP-CFG-04** | Compensation burden rates are stored per fiscal year. Rates for one fiscal year do not affect calculations for another fiscal year. |
+| **AC-WP-CFG-05** | For FICA: annual_burden = MIN(new_annual_salary, fica_wage_cap) × fica_rate_pct / 100 × fte. A position with new_annual_salary above the wage cap is burdened only on the cap amount. |
+| **AC-WP-CFG-06** | For Medicare: annual_burden = new_annual_salary × medicare_rate_pct / 100 × fte. No cap applied. |
+| **AC-WP-CFG-07** | Each compensation component maps to exactly one expense account system-wide. A component_code may not have two active mapping records simultaneously. |
+| **AC-WP-CFG-08** | Changing a compensation component mapping generates a COMPENSATION_MAPPING_UPDATED audit event capturing the old and new account codes. |
+| **AC-WP-CFG-09** | A transfer may not be initiated to a cost center without a configured designated transfer approver. The API returns HTTP 409 in this case. |
+
+## 12.2 Position Management
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-WP-POS-01** | A user with ALL_NONE confidential data grant for a cost center cannot access the Workforce Planning module for that cost center. The module is not rendered. |
+| **AC-WP-POS-02** | A user with ALL_READ confidential data grant sees position and compensation data in read-only mode. No create, edit, or lifecycle event actions are available in the UI. The API returns HTTP 403 for any write attempt by this user. |
+| **AC-WP-POS-03** | Adding an open position with a start date of October 15 produces zero salary expense for months 1–9, prorated salary expense for month 10 (15/31 of the monthly rate × FTE), and full monthly salary expense for months 11–12. |
+| **AC-WP-POS-04** | An open position's base salary is used identically to an imported base salary: merit increase, compensation burden, and proration all apply. |
+| **AC-WP-POS-05** | The base salary field for a filled (imported) position is read-only. The API returns HTTP 403 for any direct edit attempt on this field. |
+| **AC-WP-POS-06** | Creating an open position generates a POSITION_CREATED audit event with position_type = 'open'. |
+| **AC-WP-POS-07** | All positions (filled and open) with status 'active' are counted in budgeted headcount for overhead allocation, for planning periods in which they are active. |
+
+## 12.3 Salary Expense Calculation
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-WP-SAL-01** | January and February salary expense uses base salary / 12 × FTE (× proration factor if applicable). March through December use new_annual_salary / 12 × FTE (× proration factor if applicable). |
+| **AC-WP-SAL-02** | New annual salary = base_salary + (base_salary × merit_rate_pct / 100) + salary_adjustment. Merit increase is applied to base salary only. |
+| **AC-WP-SAL-03** | A position active for the full month of October has proration_factor = 31/31 = 1.00. A position starting October 15 has proration_factor = 17/31 for October (days 15–31 inclusive = 17 days). |
+| **AC-WP-SAL-04** | A termination effective October 15 produces October proration_factor = 15/31 (days 1–15 inclusive = 15 days). November and December salary expense = 0.00. |
+| **AC-WP-SAL-05** | The calculation service dry-run endpoint returns recalculated monthly figures for all 12 periods without persisting data. The save endpoint persists and triggers budget line push. |
+| **AC-WP-SAL-06** | Salary expense amounts are rounded to two decimal places per period. |
+
+## 12.4 Bonus Expense
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-WP-BON-01** | For a termination: AIPEIP bonus is zero for all 12 months. Other bonus is unaffected — monthly amounts are (other_bonus / 12 × FTE) for all active months. |
+| **AC-WP-BON-02** | For a retirement effective October 15: AIPEIP months 1–9 = aipeip_bonus / 12 × FTE. AIPEIP month 10 = (aipeip_bonus / 12 × FTE) × (15/31). AIPEIP months 11–12 = 0.00. Other bonus is unaffected. |
+| **AC-WP-BON-03** | A position with aipeip_bonus = 0.00 produces zero AIPEIP budget lines for all months, regardless of lifecycle event type. |
+| **AC-WP-BON-04** | Bonus budget lines are written to the expense accounts specified in the compensation component mapping for 'aipeip_bonus' and 'other_bonus' respectively. |
+
+## 12.5 Transfer Workflow
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-WP-TRF-01** | Initiating a transfer creates a transfer record with status 'pending' and sends an in-application notification to the designated transfer approver of the receiving cost center. |
+| **AC-WP-TRF-02** | While a transfer is pending, no other lifecycle events may be initiated on the same position. The API returns HTTP 409 for any such attempt. |
+| **AC-WP-TRF-03** | Approving a transfer updates the position's cost_center_id to the receiving cost center, triggers recalculation for both sending and receiving cost centers, and pushes updated budget lines. |
+| **AC-WP-TRF-04** | Rejecting a transfer leaves the position unchanged in the sending cost center. The initiating user receives an in-application notification of the rejection. |
+| **AC-WP-TRF-05** | A pending transfer request not actioned within 3 calendar days is automatically set to status 'expired'. The position is unchanged. The initiating user is notified. |
+| **AC-WP-TRF-06** | A transfer to a cost center without a configured designated transfer approver is rejected by the API with HTTP 409. |
+| **AC-WP-TRF-07** | The transfer expiry background job generates a TRANSFER_EXPIRED audit event for each expired transfer. |
+| **AC-WP-TRF-08** | Only the designated transfer approver of the receiving cost center may approve or reject a transfer. Other users' approve/reject attempts return HTTP 403. |
+
+## 12.6 Personnel Expense Derivation
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-WP-DER-01** | Saving any Workforce Planning data immediately triggers a recalculation and direct push to obs.budget_lines for all affected planning periods. There is no batch delay. |
+| **AC-WP-DER-02** | Personnel expense budget lines in obs.budget_lines are stored with is_calculated = TRUE and source = 'workforce_planning'. |
+| **AC-WP-DER-03** | An attempt to directly write a personnel expense budget line via the Budget Planning API returns HTTP 403. |
+| **AC-WP-DER-04** | Each compensation component (salary, AIPEIP, other bonus, and each burden component) is written as a separate budget line to its mapped expense account. |
+| **AC-WP-DER-05** | Personnel expense budget lines are written to the active budget version only. Non-active versions are not automatically updated. |
+| **AC-WP-DER-06** | If a compensation component mapping is not configured, the push skips that component and logs a warning. The save operation completes for all configured components. |
+| **AC-WP-DER-07** | Budgeted headcount for overhead allocation equals the count of active positions (filled and open) in the cost center as of the first day of each planning period. Terminated and retired positions are excluded for periods after their end_date. |
+
+# 13. Open Items
+
+| **OI-WP-01 — RESOLVED — Domain Glossary v1.9 current.**** Domain Glossary v1.9 (reached via intermediate versions from v1.6) has been issued incorporating all required amendments: merit increase definition corrected to global Administrator-configured rate; AIPEIP bonus definition rewritten to dollar-amount model; salary adjustment corrected to dollar amount only; salary expense rewritten with Jan/Feb vs. Mar–Dec rule and day-level proration; compensation burden corrected to Administrator-only authority with salary cap rule; new annual salary formula updated; confidential data list corrected; new terms added (budgeted headcount, designated transfer approver). This item is closed.** |
+| --- |
+
+| **OI-WP-02 — RESOLVED — Application Architecture Specification v3.6 current.**** Application Architecture Specification v3.6 (reached via amendments from v3.3) has been issued. Section 3.3 calculation service implemented rule types list fully enumerates all workforce planning rules defined in this specification (Sections 5.1–5.3): salary expense Jan/Feb vs. Mar–Dec split with day-level proration, merit increase, new annual salary derivation, bonus spreading, and compensation burden with salary cap handling for FICA/SUTA/FUTA. Section 3.4 business rules configuration updated with the three WP configuration tables. This item is closed.** |
+| --- |
+
+| **OI-WP-03 — RESOLVED — In-Application Notification Mechanism Specification v1.0 issued.**** In-Application Notification Mechanism Specification v1.0 has been issued. The specification fully defines the notification delivery mechanism: notification bell component (application shell header, unread count badge, polling model); notification inbox panel (read/unread state, pagination, mark-read); obs.notifications PostgreSQL table schema; notification service API (create_notification, create_notifications_bulk, GET /api/v1/notifications, POST mark-read, POST mark-all-read); and all transfer workflow notification touchpoints (TRANSFER_INITIATED to receiving cost center designated approver; TRANSFER_REJECTED and TRANSFER_EXPIRED to initiating user). Implementation of the transfer workflow notification touchpoints must follow the Notification Mechanism Specification v1.0 Sections 4 and 5. No-op stubs are not acceptable. This item is closed.** |
+| --- |
+
+All open items are now resolved. No outstanding items remain in this specification.
+
+# 14. Document Control
+
+| **Version** | **Date** | **Author** | **Change Summary** |
+| --- | --- | --- | --- |
+| 1.0 | Draft | TBD | Initial version — position management, compensation calculation rules (salary expense, bonus expense, compensation burden), global configuration (merit increase rate, burden rates, component mapping, transfer approver), employee lifecycle events (salary adjustment, termination, retirement), transfer workflow, personnel expense derivation, headcount for overhead allocation, administration module screens, Delta Lake schema, audit events, acceptance criteria. |
+| 1.0 — Full Restatement | Draft | TBD | Full restatement with updated depends-on references. All specification content is identical to v1.0. Section 1.3 relationship table updated to current versions: Glossary v1.9, Architecture v3.5, Security v1.3, UX v1.4, Data Integration v1.5, Budget Planning v1.1. Section 13 open items: OI-WP-01 and OI-WP-02 resolution language updated to reference current specification versions; OI-WP-03 closed — In-Application Notification Mechanism Specification v1.0 issued. Related documents list updated. |
+| 1.1 — Full Restatement | Draft | Claude | Databricks-free platform cascade aligned to Architecture Spec v3.6. Section 10 heading changed from "Delta Lake Schema Additions" to "PostgreSQL Schema Additions" and its intro reworded to PostgreSQL; no table or column-type content changed (abstract types such as STRING and BOOLEAN preserved). Section 11 audit-log reference changed from "Delta Lake — append-only" to "PostgreSQL — append-only, enforced by a BEFORE UPDATE OR DELETE trigger." Delta Lake / Databricks references in the scope, relationship table, calculation-service pointers, and open items replaced with PostgreSQL and Architecture v3.6. Depends-on updated to Architecture v3.6, Security v1.4, UX/UI v1.5, Data Integration v1.6. |
+| 1.1 — Full Restatement (errata) | Draft | Claude | Version-reference corrections per Specification Consistency & Errata Report v1.0 (in-place errata; no technical content changed). Active references in the depends-on header, relationship/related-documents lists, and instructional cross-references updated to current versions: System Context and Domain Glossary v1.9 → v1.11; Functional Requirements: Workforce Planning v1.0 → v1.1; Data Integration Specification v1.5 → v1.6; In-Application Notification Mechanism Specification v1.0 → v1.1; Security and Access Control Specification v1.3 → v1.4; UX and UI Specification v1.4 → v1.5; Project Context Handoff v2.3 → v2.4 (as applicable to this document). Historical Document Control rows and open-item resolution narratives describing past events are unchanged. |
+
+**Related Documents**
+
+- OPEX Budgeting System — System Context and Domain Glossary v1.11
+
+- OPEX Budgeting System — Application Architecture Specification v3.6
+
+- OPEX Budgeting System — Security and Access Control Specification v1.4
+
+- OPEX Budgeting System — UX and UI Specification v1.5
+
+- OPEX Budgeting System — Data Integration Specification v1.6
+
+- OPEX Budgeting System — In-Application Notification Mechanism Specification v1.1
+
+- OPEX Budgeting System — Functional Requirements: Budget Planning v1.1
+
+- OPEX Budgeting System — Functional Requirements: Finance Approval Workflow v1.2
+
+- OPEX Budgeting System — Functional Requirements: Reporting v1.1
+
+- OPEX Budgeting System — Project Context Handoff v2.4
+
+OBS_Functional_Requirements_Workforce_Planning_v1_1_Full.docx Page of
+
+Page  of

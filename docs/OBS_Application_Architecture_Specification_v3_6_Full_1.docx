@@ -1,0 +1,559 @@
+OPEX Budgeting System  —  Application Architecture Specification  (v3.6)	CONFIDENTIAL  |  DRAFT
+
+**OPEX Budgeting System**
+
+**Application Architecture Specification**
+
+*Version 3.6 — Full Restatement*
+
+*OBS_Application_Architecture_Specification_v3_6_Full_1.docx*
+
+| **Document title** | **Application Architecture Specification** |
+| --- | --- |
+| **System** | OPEX Budgeting System (OBS) |
+| **Version** | 3.6 — Full Restatement |
+| **Status** | For Review |
+| **Audience** | Development Team, Technical Leads, Project Stakeholders |
+| **Depends on** | OBS System Context and Domain Glossary v1.11; OBS Security and Access Control Specification v1.4; OBS In-Application Notification Mechanism Specification v1.1 |
+
+| ***Full Restatement Notice: This document is a full restatement of the Application Architecture Specification incorporating all amendments from v3.1 through v3.6. It supersedes all prior versions. All content is present in full — there is no need to consult any prior version file.*** |
+| --- |
+
+# 1. Purpose and Scope
+
+This document defines the application architecture for the OPEX Budgeting System — an internal web-based application supporting budgeting and workforce planning across cost centers. It establishes the technical envelope within which all functional requirements, security controls, and UI specifications must be designed.
+
+This specification is intended to be consumed directly by development teams and AI-assisted code generation tools. All architectural decisions recorded here are binding unless explicitly superseded by a versioned amendment.
+
+## 1.1 System Summary
+
+| **Application type** | **Web application — internet-accessible, restricted to authenticated corporate users via SSO** |
+| --- | --- |
+| **Primary functions** | Budget planning, workforce planning, actuals reporting, Finance approval workflow |
+| **User base** | 50–200 internal users (cost center owners, Finance Reviewers, and executives) |
+| **Deployment** | Cloud-hosted on Microsoft Azure |
+| **Data platform** | Azure PostgreSQL Flexible Server as the primary data store |
+| **Integration model** | File-based import (CSV/Excel) from accounting and HR admin systems via Azure Blob Storage |
+| **Data refresh** | Hourly (accounting system actuals); daily (HR admin system employees); ad hoc, Administrator-triggered (cost center and account hierarchies) |
+| **Authentication** | Microsoft Entra ID via OIDC/OAuth 2.0 (SSO) |
+
+# 2. Architecture Overview
+
+The system follows a three-tier web application architecture: a browser-based single-page application (SPA) frontend, a backend API layer, and a relational data platform. A separate batch processing layer handles file ingestion from source systems on a per-source-system schedule. All business rule evaluation, including calculations, is performed server-side.
+
+## 2.1 Architectural Pattern
+
+- Three-tier: Presentation → API → Data
+
+- Frontend: Single-page application (SPA) served as static assets via Azure CDN / Azure Static Web Apps
+
+- Backend: RESTful API — stateless, horizontally scalable — hosted on Azure App Service (Linux, Python 3.11)
+
+- Data platform: Azure PostgreSQL Flexible Server as the single source of truth for all planning and actuals data
+
+- Batch layer: Azure Functions on per-source-system schedules for file ingestion and data processing
+
+- Authentication: Delegated to Microsoft Entra ID via OIDC/OAuth 2.0 — no local credential management
+
+- Calculation model: Reactive server-side calculation service — the frontend never owns authoritative business rule logic
+
+## 2.2 Hosting Model
+
+The backend API is hosted on Azure App Service (Linux, Python 3.11). App Service is the single API hosting track. There is no secondary or fallback hosting track.
+
+| **Claude Code note — hosting-agnostic API** | **The API codebase must be written to be hosting-agnostic — no hosting-platform-specific dependencies in the core API logic. The API serves standard HTTP; only infrastructure configuration (environment variables, connection strings, identity bindings) is environment-specific. This keeps the codebase portable and the local DuckDB development path behaviourally identical to the deployed PostgreSQL path.** |
+| --- | --- |
+
+### 2.2.1 Architectural Decision Records — Platform Baseline
+
+The following architectural decisions are the confirmed platform baseline for this specification. They supersede the earlier Databricks-based architecture in full. The migration steps that implement this baseline are defined in the Azure Cloud Migration Specification.
+
+| **ADR** | **Decision** | **Rationale** |
+| --- | --- | --- |
+| ADR-01 | Data platform: Azure PostgreSQL Flexible Server. All obs.* tables are PostgreSQL relations within the obs schema, which is the single source of truth. | The Databricks workspace is not available to this project. PostgreSQL Flexible Server provides a managed, highly available relational platform sufficient for the transactional and reporting workload of 50–200 users. |
+| ADR-02 | Primary API host: Azure App Service (Linux, Python 3.11). There is no fallback hosting track. | App Service serves the stateless FastAPI application directly over HTTP with managed identity, autoscale, and zone redundancy. |
+| ADR-03 | Batch processing: Azure Functions — timer-triggered for actuals (hourly) and employees (daily); Blob Storage event-triggered for hierarchies (ad hoc). | Azure Functions provides scheduled and event-driven execution without a cluster dependency, scaling independently of the interactive API. |
+| ADR-04 | Idempotent promotion uses PostgreSQL INSERT … ON CONFLICT DO UPDATE; audit-log append-only is enforced by a BEFORE UPDATE OR DELETE trigger; query performance is served by PostgreSQL indexes. | Native PostgreSQL mechanisms replace Delta Lake MERGE, the delta.appendOnly table property, and Z-ORDER optimisation respectively. |
+
+## 2.3 Design Principles
+
+- The frontend is a display and interaction layer only — it delegates all business rule evaluation to the backend
+
+- Calculation results always originate from the server-side calculation service; the frontend may display optimistic local estimates for simple arithmetic while a server response is in flight, but always reconciles to the server result
+
+- The system never writes back to source systems under any circumstances
+
+- All data mutations are recorded in an immutable audit log
+
+- Business rules are stored as configuration data in PostgreSQL — not hardcoded — so they can be updated without a code deployment
+
+## 2.4 Technology Stack
+
+| **Claude Code note — technology stack** | **The stack below reflects the confirmed decisions: Azure as cloud provider, Azure PostgreSQL Flexible Server as data platform, Microsoft Entra ID as identity provider, and Azure App Service as the API host. React with TypeScript is recommended for the frontend given its mature ecosystem and strong data grid library support suited to planning workflows.** |
+| --- | --- |
+
+| **Layer** | **Technology** | **Notes** |
+| --- | --- | --- |
+| Frontend framework | React (TypeScript) | SPA; strong grid/table component ecosystem for data-dense planning UIs |
+| Frontend build | Vite | Fast builds, excellent TypeScript support |
+| UI component library | MUI (Material UI) | Data grid and table components suited to budget entry and Finance Review workflows |
+| Frontend hosting | Azure Static Web Apps | Bundles CDN hosting and deployment pipeline; serves SPA static assets |
+| Backend API host | Azure App Service | Linux, Python 3.11; hosts the stateless FastAPI application over HTTP |
+| API framework | Python + FastAPI | Stateless REST API; hosting-agnostic core logic |
+| Data platform | Azure PostgreSQL Flexible Server | Single source of truth for all planning, actuals, and reference data |
+| Batch processing | Azure Functions | Timer-triggered: hourly (actuals), daily (employees); Blob-event-triggered: ad hoc (hierarchies) |
+| File landing zone | Azure Blob Storage | Source system file drop location; monitored by Azure Functions |
+| Authentication | Microsoft Entra ID — OIDC/OAuth 2.0 | Corporate SSO; App Service and Azure Functions authenticate to Azure resources via managed identity |
+| Business rules store | PostgreSQL configuration tables | Compensation burden rates, merit increase rates, component mappings, and overhead allocation rates stored as data (see Section 3.4) |
+| Excel export | openpyxl (Python) | Programmatic xlsx generation supporting formatting and multi-sheet output |
+
+# 3. Component Architecture
+
+## 3.1 Frontend (SPA)
+
+The frontend is a React TypeScript SPA served from Azure Static Web Apps. It communicates exclusively with the backend API over HTTPS. No direct database access. No authoritative business logic resides in the frontend — it is a rendering and interaction layer only.
+
+The frontend supports three device tiers:
+
+- Desktop browsers — full functionality including data entry, workforce planning, reporting, Finance review actions, and administration
+
+- Tablet browsers — read-only and summary views; no data entry; Finance Review approval actions suppressed
+
+- Mobile phone browsers — read-only and summary views; no data entry
+
+Key frontend modules:
+
+- Authentication module — Entra ID OIDC redirect, token storage, session management
+
+- Budget planning module — data entry grids, line item management, vendor selection, real-time calculation display
+
+- Workforce planning module — position management, headcount grids, compensation entry, real-time calculation display
+
+- Reporting module — plan vs. actuals views, variance analysis, drill-down, Excel export
+
+- Finance Review module — approval queue, review detail screen, approve/reject action panel, bulk approve; accessible to Finance Reviewers and Administrators; scoped to assigned cost centers
+
+- Administration module — user management, cost center assignments, global configuration (admin role only)
+
+- Shared component library — grid, form, filter, and chart components used across modules
+
+## 3.2 Backend API
+
+The API is a stateless RESTful service built with Python and FastAPI. All state is held in PostgreSQL. The API enforces all business rules, data validation, access control, and calculation logic. The frontend may never bypass the API to access data directly.
+
+Key API responsibilities:
+
+- Entra ID token validation on every request
+
+- Role and cost center permission enforcement on every data operation
+
+- Budget line CRUD with validation rules
+
+- Workforce position CRUD with compensation calculation
+
+- Calculation service — dry-run and what-if endpoints for real-time business rule evaluation
+
+- Actuals and plan data retrieval with rollup aggregation
+
+- Excel export generation via openpyxl
+
+- Audit log writes for all data mutations
+
+- File ingestion trigger coordination with Azure Functions
+
+- Finance Review record lifecycle — creation on budget submission, approve action (POST /api/v1/finance-review/{review_id}/approve), reject action (POST /api/v1/finance-review/{review_id}/reject), bulk approve (POST /api/v1/finance-review/bulk-approve), and approval queue retrieval (GET /api/v1/finance-review)
+
+- resolve_budget_version_status() — server-side helper function invoked after every approve or reject action; evaluates the aggregate status of all obs.finance_review_records for a version and transitions obs.budget_versions.status to 'Approved' or 'Rejected' when all cost center submissions have resolved; defined in Functional Requirements: Finance Approval Workflow v1.2 Section 4.3
+
+- Finance Review budget summary reads — the GET /api/v1/finance-review/{review_id} response includes a budget_summary object serving the read-only budget grid in the Review Detail screen; confidential data enforcement applies at the API response layer per the standard grant rules
+
+- Notification service — in-application notification delivery:
+
+- Notification record creation — server-side creation of obs.notifications records synchronously within the same API transaction as the triggering event. Notification failures are non-fatal and must not roll back the triggering event. Defined in In-Application Notification Mechanism Specification v1.1 Section 4.2.
+
+- Recipient resolution — server-side resolution of notification recipients per event type. Defined in Notification Mechanism Specification v1.1 Section 4.1.
+
+- GET /api/v1/notifications — paginated, user-scoped notification list with unread_only filter and expiry exclusion.
+
+- POST /api/v1/notifications/{notification_id}/mark-read — idempotent mark-read for a single notification.
+
+- POST /api/v1/notifications/mark-all-read — bulk mark-read for all unread notifications belonging to the authenticated user.
+
+- Transfer request notification expiry — expiry of TRANSFER_INITIATED notifications when a transfer leaves pending status.
+
+| **Claude Code note — notification service module** | **Notification service module: src/services/notification_service.py Functions: create_notification(), create_notifications_bulk() Wrap all notification writes in try/except — non-fatal, log WARNING on failure. Poll support: GET /api/v1/notifications?unread_only=true****&****page_size=1 must return   unread_count in response body for efficient badge polling from the frontend. Full endpoint spec: Notification Mechanism Specification v1.1 Section 8.** |
+| --- | --- |
+
+## 3.3 Calculation Service
+
+The calculation service is a logically distinct component within the backend API. Its sole responsibility is to receive a proposed change, apply all relevant business rules from the configuration store, and return the recalculated state. It does not persist data — it evaluates and returns.
+
+Calculation service characteristics:
+
+- Exposes dry-run endpoints — a proposed change can be evaluated without being saved
+
+- Heavy aggregation calculations are executed as PostgreSQL queries for efficient execution against the obs schema
+
+- Response time target: p95 under 300 milliseconds for single-entity recalculation — see Section 8
+
+- The frontend calls the calculation service on field change events; the user sees updated totals as they type
+
+| **Claude Code note — calculation service pattern** | **The calculation service must be implemented as dry-run first — every calculation must be executable without a side effect. The save operation is a separate API call that persists the already-validated result. This ensures the frontend can call the calculation service freely during editing without creating partial or invalid records. Never combine calculation and persistence in a single endpoint.** |
+| --- | --- |
+
+| **Claude Code note — calculation service implemented rule types** | **The calculation service configuration store contains the following rule type categories: 1. Workforce Planning rules (defined in Functional Requirements: Workforce Planning v1.1 Sections 5.1–5.3):    obs.merit_increase_rates — one record per fiscal year; rate_pct applied globally to all positions    obs.compensation_burden_rates — one record per fiscal year; seven component rates and wage caps for FICA, SUTA, FUTA    obs.compensation_component_mappings — system-level mapping from compensation component codes to expense account codes 2. Budget Planning rules (defined in Functional Requirements: Budget Planning v1.1):    obs.overhead_allocation_rates — shared service cost rates per account and geography (Section 7.2.3) Not implemented: account_mappings (source codes equal OBS codes); fiscal_calendar_logic (fiscal year = calendar year). The ****'****Business rules store****'**** row in the technology stack table (Section 2.4) covers only the categories above. The Finance Approval Workflow does not introduce new calculation service rule types. The resolve_budget_version_status() helper (Section 3.2) is a discrete API-layer function, not a configuration-driven calculation rule.** |
+| --- | --- |
+
+## 3.4 Data Platform — Business Rules Configuration
+
+The business rules configuration area of the PostgreSQL obs schema stores the following table types:
+
+| **Configuration Table** | **Description** |
+| --- | --- |
+| obs.merit_increase_rates | Global merit increase rate per fiscal year. One record per fiscal year with rate_pct (DECIMAL(6,4)). Applied uniformly to all positions. Effective March 1 of the fiscal year. Defined in Functional Requirements: Workforce Planning v1.1 Section 3.1. |
+| obs.compensation_burden_rates | Employer tax and benefit burden rates per fiscal year. One record per fiscal year containing all seven component rates (fica_rate_pct, medicare_rate_pct, state_income_tax_rate_pct, federal_income_tax_rate_pct, suta_rate_pct, futa_rate_pct, other_benefits_rate_pct) and wage caps for capped components (fica_wage_cap, suta_wage_cap, futa_wage_cap). Defined in Functional Requirements: Workforce Planning v1.1 Section 3.2. |
+| obs.compensation_component_mappings | System-level mapping from compensation component codes (e.g., 'salary', 'aipeip_bonus', 'burden_fica') to expense account codes. One record per component code. Drives which expense accounts receive workforce planning budget line pushes. Defined in Functional Requirements: Workforce Planning v1.1 Section 3.3. |
+| obs.overhead_allocation_rates | Shared service cost rates per expense account and geography. Supports universal rates (geography_code = NULL) and geography-specific rates. Defined in Functional Requirements: Budget Planning v1.1 Section 7.2.3. |
+
+Note: Account mapping tables and fiscal calendar logic tables are not implemented. These rule type categories were included in earlier versions as placeholders pending functional requirements authoring; they are now confirmed as not required.
+
+## 3.5 Data Platform (Azure PostgreSQL Flexible Server)
+
+Azure PostgreSQL Flexible Server is the single source of truth for all data in the system. All obs.* tables are relations within the obs schema.
+
+Core obs schema table areas:
+
+- Organizational dimensions — cost centers, expense accounts, fiscal calendar
+
+- Reference data — vendor master, employee master
+
+- Budget data — budget versions, budget lines
+
+- Workforce data — positions, position transfers, headcount plans
+
+- Actuals data — imported actuals records (insert-only, never modified)
+
+- Finance Review data — obs.finance_review_records tracking the approval workflow status and outcome per cost center submission; one record per version_id + cost_center_id + fiscal_year combination; defined in Functional Requirements: Finance Approval Workflow v1.2 Section 4.3
+
+- Notification data — obs.notifications: user-scoped in-application notification records. Mutable (is_read, read_at columns). Excluded from the immutable audit log pattern — is_read is the only mutable field. Schema defined in In-Application Notification Mechanism Specification v1.1 Section 7.1. Served by an index on (user_id, is_read, created_at).
+
+- Audit log — immutable append-only record of all mutations
+
+- User and role data — users, role assignments, cost center access grants
+
+- Business rules configuration — merit increase rates, compensation burden rates, compensation component mappings, and overhead allocation rates
+
+## 3.6 Batch Ingestion Layer
+
+Azure Functions execute the ingestion pipeline on a per-source-system schedule. Actuals files from the accounting system are processed on an hourly timer trigger. Employee files from the HR admin system are processed on a daily timer trigger. Cost center hierarchy and account hierarchy files are detected and processed on an ad hoc basis via a Blob Storage event trigger whenever an Administrator deposits a file in the landing zone — there is no scheduled trigger for hierarchy files. Each run processes all new files of the applicable type found in the landing zone since the last successful run.
+
+Ingestion pipeline steps:
+
+- Step 1 — File detection: The Function checks designated Azure Blob Storage landing folders for new files (timer triggers) or responds to a blob-created event (hierarchy trigger)
+
+- Step 2 — Validation: File structure, column presence, data types, and referential integrity checks against existing dimension data
+
+- Step 3 — Staging: Valid records written to PostgreSQL staging tables; invalid records written to error log with row-level detail
+
+- Step 4 — Promotion: Staged records promoted to production obs tables using PostgreSQL transactions for atomicity
+
+- Step 5 — Notification: Import summary (record counts, error counts) written to audit log; system administrators notified of any errors
+
+| **Claude Code note — ingestion idempotency** | **All ingestion jobs must be fully idempotent. Running the same file through the pipeline twice must not create duplicate records. Use file content hash or source system record identifiers as deduplication keys. PostgreSQL INSERT … ON CONFLICT DO UPDATE (atomic upsert) is the preferred mechanism for promoting staged records to production tables. Never use INSERT without deduplication logic.** |
+| --- | --- |
+
+# 4. Deployment Architecture
+
+## 4.1 Cloud Provider and Platform
+
+The system is deployed on Microsoft Azure. All Azure services are provisioned within a single Azure subscription and region to minimize latency and data transfer costs.
+
+## 4.2 Azure Services
+
+| **Service** | **Azure product** | **Purpose** |
+| --- | --- | --- |
+| Frontend hosting | Azure Static Web Apps | SPA static asset hosting with integrated CDN and deployment pipeline |
+| Backend API host | Azure App Service | API hosting (Linux, Python 3.11) |
+| Data platform | Azure PostgreSQL Flexible Server | Data processing, storage, and analytical query execution |
+| File landing zone | Azure Blob Storage | Integration file drop for source system exports |
+| Batch processing | Azure Functions | Scheduled and event-driven ingestion jobs — hourly (actuals), daily (employees), ad hoc (hierarchies) |
+| Identity provider | Microsoft Entra ID | SSO authentication and user/group management |
+| Secrets management | Azure Key Vault | API keys, connection strings, service credentials |
+| Monitoring | Azure Monitor + Application Insights | API telemetry, error tracking, performance monitoring |
+
+## 4.3 Environments
+
+| **Environment** | **Purpose** | **Data policy** |
+| --- | --- | --- |
+| Development | Active development and unit testing | Synthetic data only — no production data |
+| Staging | Integration testing, UAT, pre-release validation | Anonymized copy of production data |
+| Production | Live system for all users | Real data — full access controls enforced |
+
+## 4.4 High Availability
+
+The production environment must meet a 99.5% monthly uptime SLA. This requires:
+
+- Azure Static Web Apps provides built-in high availability for the frontend via global CDN
+
+- Azure App Service deployed with minimum two instances across availability zones
+
+- Azure PostgreSQL Flexible Server configured with zone-redundant high availability (standby replica in a second availability zone)
+
+- Azure Blob Storage configured with zone-redundant storage (ZRS)
+
+- Batch jobs designed to be idempotent — safe to retry on failure without data corruption
+
+- Health check endpoints on the API for load balancer and monitoring integration
+
+## 4.5 Scalability
+
+For a user base of 50 to 200 users with workload concentrated around budget cycle periods, the Azure App Service autoscale configuration handles peak planning periods without manual intervention, and the PostgreSQL Flexible Server compute tier can be scaled to meet demand. The batch ingestion layer scales independently of the interactive API layer — Azure Functions execute on their own consumption or premium plan and do not compete with interactive query resources.
+
+# 5. Integration Architecture
+
+## 5.1 Integration Model
+
+The OPEX Budgeting System is an integration consumer only. It reads from source systems and never writes back to them. All integration is file-based: source systems export data to Azure Blob Storage, and Azure Functions ingest those files on a per-source-system schedule.
+
+## 5.2 Source Systems
+
+| **Source system** | **Data provided** | **File format** | **Frequency** |
+| --- | --- | --- | --- |
+| Accounting system | Actuals by cost center, expense account, and month | CSV or Excel (.xlsx) | Hourly |
+| HR admin system | Employee records: name, cost center, role, compensation, employment status, state of residence, AIPEIP eligibility flag | CSV or Excel (.xlsx) | Daily |
+| Accounting system (hierarchies) | Cost center and account hierarchy structures | CSV or Excel (.xlsx) | Ad hoc — Administrator-triggered |
+
+## 5.3 File Landing Zone
+
+- Azure Blob Storage container designated as the integration landing zone
+
+- Source systems deposit files to agreed folder paths within the container
+
+- Azure Functions process the landing zone on a per-source-system schedule: hourly for actuals files, daily for employee files, and on an ad hoc basis (via Blob Storage event trigger) for hierarchy files deposited by an Administrator
+
+- Files are retained in the landing zone for 30 days for reprocessing and audit purposes
+
+- Processed files are moved to an archive folder; failed files moved to an error folder with a corresponding error log entry
+
+- Access to the landing zone is restricted to source system service accounts and the Azure Functions managed identity
+
+## 5.4 Integration Constraints
+
+- The planning system must never have direct database connectivity to source systems
+
+- File format specifications (column names, data types, date formats) must be documented in a separate Data Integration Specification and versioned independently
+
+- The ingestion layer must handle partial files gracefully — a file with some invalid rows must process valid rows and log errors for invalid rows without rejecting the entire file
+
+- Re-ingestion of a previously processed file must be idempotent — duplicate records must not be created
+
+- If no new files are found during a scheduled run, the job completes silently with no error
+
+# 6. Authentication and Session Management
+
+Authentication is fully delegated to Microsoft Entra ID. The planning system does not manage usernames, passwords, or credential storage. All users authenticate through the corporate Entra ID SSO flow before accessing any part of the application. The application is accessible from the public internet — Entra ID authentication is the sole access control gate.
+
+## 6.1 SSO Protocol
+
+- Protocol: OpenID Connect (OIDC) with OAuth 2.0 — the modern standard supported natively by Microsoft Entra ID
+
+- The application acts as an OIDC Relying Party registered in Entra ID
+
+- On successful authentication, Entra ID returns identity claims including: unique user ID (object ID), email address, display name, and group memberships
+
+- Group membership claims from Entra ID are not used for OBS access control — access is governed entirely by the OBS user registry capability flags and cost center access grants
+
+- Multi-factor authentication (MFA) is enforced at the Entra ID level — the application relies on the IdP to enforce MFA and does not implement it independently
+
+- Because the application is internet-accessible, MFA enforcement at the IdP is a hard requirement, not optional
+
+## 6.2 Session Management
+
+- Sessions are managed via short-lived JWT access tokens and longer-lived refresh tokens issued by Entra ID
+
+- Access token lifetime: 60 minutes
+
+- Refresh token lifetime: 8 hours (one working day)
+
+- Tokens are stored in memory (access) and httpOnly secure cookies (refresh) — never in localStorage
+
+- All API endpoints require a valid access token; 401 responses trigger silent refresh or redirect to Entra ID login
+
+- Session termination (logout) revokes the refresh token and redirects to Entra ID logout endpoint
+
+## 6.3 Service Identity and Entra ID
+
+Authentication for end users is delegated to Microsoft Entra ID via OIDC/OAuth 2.0. Service-to-service authentication between the compute tiers and Azure resources uses Entra ID managed identities — no static credentials required. The Azure App Service instance and the Azure Functions app each have a system-assigned managed identity, granted least-privilege access to PostgreSQL Flexible Server, Azure Blob Storage, and Azure Key Vault.
+
+## 6.4 API Security
+
+- All API traffic over HTTPS/TLS 1.2 minimum
+
+- CORS policy restricts API access to the known frontend origin only
+
+- CSRF protection via SameSite cookie attributes and custom request headers
+
+- Rate limiting applied at the API gateway level
+
+- Azure Key Vault used for all secrets management — no credentials in code or configuration files
+
+# 7. Audit Logging
+
+All data mutations must be recorded in an immutable audit log stored in PostgreSQL. The audit log supports compliance, dispute resolution, and change tracking for budget and workforce data.
+
+## 7.1 Events to Log
+
+- All budget line creates, updates, and deletes — including previous and new values
+
+- All workforce position creates, updates, and deletes
+
+- All workforce lifecycle events — salary adjustments, terminations, retirements, transfer initiations, approvals, rejections, and expiries
+
+- Global configuration changes — merit increase rate updates, compensation burden rate updates, compensation component mapping changes
+
+- Budget version creation and activation
+
+- Finance approval workflow events — budget submission (BUDGET_SUBMITTED), Finance review record approve (BUDGET_APPROVED), Finance review record reject (BUDGET_REJECTED), budget version fully approved (BUDGET_VERSION_APPROVED), budget version rejected (BUDGET_VERSION_REJECTED), Finance Reviewer flag set (FINANCE_REVIEWER_FLAG_SET); defined in Functional Requirements: Finance Approval Workflow v1.2 Section 10
+
+- All file ingestion events — file name, record counts, error counts, outcome
+
+- User login and logout events
+
+- User provisioning, role assignment changes, and cost center access changes
+
+- Excel export events — user, scope, timestamp
+
+- Calculation service calls that result in a save — capturing the rules applied and values computed
+
+- Notification read events — NOTIFICATION_READ: written when a user marks one notification read or marks all notifications read. Payload: notification_id (or 'all' for bulk), user_id, timestamp. Defined in Notification Mechanism Specification v1.1 Section 7.2.
+
+## 7.2 Audit Record Structure
+
+Each audit record must capture:
+
+| **Field** | **Description** |
+| --- | --- |
+| event_id | Unique identifier for the audit event (UUID) |
+| event_timestamp | UTC timestamp at time of event (millisecond precision) |
+| event_type | Enumerated event category (e.g., BUDGET_LINE_UPDATE, USER_LOGIN, MERIT_RATE_UPDATED, BUDGET_APPROVED, BUDGET_REJECTED, NOTIFICATION_READ) |
+| user_id | Entra ID object ID of the authenticated user who performed the action |
+| session_id | Session identifier linking related events |
+| entity_type | The type of record affected (e.g., BudgetLine, Position, FinanceReviewRecord, NotificationRecord) |
+| entity_id | The ID of the affected record |
+| previous_value | JSON snapshot of the record before the change (mutations only) |
+| new_value | JSON snapshot of the record after the change (mutations only) |
+| ip_address | Client IP address |
+| outcome | SUCCESS or FAILURE with error code on failure |
+
+## 7.3 Audit Log Integrity
+
+- Audit records are append-only — no update or delete operations are permitted on audit records
+
+- Append-only enforcement on the obs.audit_log table is implemented via a BEFORE UPDATE OR DELETE trigger that raises an exception, rejecting any attempted modification or deletion
+
+- Audit records are retained for a minimum of 3 years
+
+- Audit log is stored in a restricted PostgreSQL schema — write access limited to the API service identity only
+
+# 8. Non-Functional Requirements
+
+| **Requirement** | **Target** | **Notes** |
+| --- | --- | --- |
+| Availability | 99.5% monthly uptime | Production environment; excludes scheduled maintenance windows |
+| API response time | p95 < 500ms | For standard data retrieval; bulk export excluded |
+| Calculation service response time | p95 < 300ms | Single-entity recalculation; must feel immediate to the user during data entry |
+| Finance Review queue response time | p95 < 500ms | GET /api/v1/finance-review for up to 500 cost centers in scope |
+| Finance Review detail response time | p95 < 1,000ms | GET /api/v1/finance-review/{review_id} including budget_summary object |
+| Page load time | Initial load < 3s on broadband | SPA shell; data loads asynchronously |
+| Concurrent users | 50 simultaneous without degradation | Typical peak during budget cycle |
+| Excel export | Single cost center export < 10s | Full fiscal year, all accounts |
+| Batch import — actuals | Completes within 1 hour of scheduled trigger | Worst-case file sizes based on current org size |
+| Batch import — employees | Completes within 1 hour of scheduled trigger | Worst-case file sizes based on current org size |
+| Batch import — hierarchies | Completes within 1 hour of Administrator trigger | Cost center and account hierarchy files |
+| Data retention | Actuals and budget data: 5 years minimum | Audit log: 3 years minimum; Finance review records: retained for the life of the budget version |
+| Browser support — desktop | Latest two versions of Chrome, Edge, Safari, Firefox | Full functionality including Finance Review actions |
+| Browser support — tablet | Latest two versions of Chrome (Android), Safari (iOS) | Read-only and summary views; Finance Review approval actions suppressed |
+| Browser support — mobile | Latest two versions of Chrome (Android), Safari (iOS) | Read-only and summary views |
+| Accessibility | WCAG 2.1 Level AA | Applies to all user-facing screens across all device tiers including Finance Review module |
+
+# 9. Constraints and Assumptions
+
+## 9.1 Constraints
+
+- The system must not write data back to the accounting or HR admin systems under any circumstances
+
+- All user authentication must flow through Microsoft Entra ID — no local credential management
+
+- File-based integration via Azure Blob Storage is the only approved integration method with source systems at this time
+
+- Compensation data (employee salaries) is sensitive and must be subject to additional access controls defined in the Security and Access Control Specification
+
+- The frontend must never own authoritative business rule or calculation logic
+
+- Unauthenticated public access to any part of the application is not permitted — SSO authentication via Entra ID is required for all access
+
+## 9.2 Assumptions
+
+- Azure PostgreSQL Flexible Server can be provisioned at a compute and storage tier sufficient to support the API hosting and reporting workload for 50–200 users
+
+- Microsoft Entra ID is the corporate identity provider and can supply identity claims (object ID, email, display name) via OIDC at login time
+
+- MFA is enforced at the Entra ID level for all users — the application does not implement MFA independently
+
+- The accounting system can produce CSV or Excel file exports in an agreed format on an hourly cadence; the HR admin system can produce CSV or Excel file exports in an agreed format on a daily cadence
+
+- The Azure Blob Storage landing zone can be provisioned within the same Azure subscription and made accessible to source system export processes via service account credentials
+
+- The development team (internal and external) has access to the Azure subscription for infrastructure provisioning and development
+
+## 9.3 Out of Scope
+
+- Native mobile application (iOS or Android) — mobile browser access is supported in read-only mode
+
+- Write-back to accounting or HR source systems
+
+- Real-time data synchronization with source systems — file-based batch import is the approved integration model
+
+- Multi-currency support — single currency assumed
+
+- Access without SSO authentication — unauthenticated public access is explicitly out of scope
+
+# 10. Document Control
+
+| **Version** | **Date** | **Author** | **Change summary** |
+| --- | --- | --- | --- |
+| 1.0 | Draft | TBD | Initial version |
+| 2.0 | Draft | TBD | Updated: Azure/Databricks/Entra ID confirmed; internet access model (Option 2); device support tiers; reactive calculation service; batch frequency 2–3x per day; American English throughout |
+| 3.0 | Draft | TBD | System renamed from Connected Planning System to OPEX Budgeting System |
+| 3.1 | Draft | TBD | Updated data refresh frequencies throughout: actuals changed to hourly; employees changed to daily; hierarchies changed to ad hoc, Administrator-triggered. Updated §1.1, §2, §2.1, §2.4, §3.5, §4.2, §5.1, §5.2, §5.3, §8, and §9.2. Added hierarchy row to §5.2. Split batch import NFR into three rows. Updated related documents. |
+| 3.2 | Draft | TBD | Section 3.3: removed account mapping rules and fiscal calendar logic from implemented rule types. Section 3.4 restated. Section 2.4 business rules store row updated. Section 6.1 clarified that group memberships not used for OBS access control. Section 9.3 updated to reflect budget submission in scope. |
+| 3.3 | Draft | TBD | Section 3.3: implemented rule types expanded with full enumeration of workforce planning calculation rules (WP FR v1.0 §5.1–5.3). Section 3.4: three new configuration tables listed. Section 2.4 updated. Section 5.2 HR admin row updated. Section 7.1 workforce lifecycle and global configuration events added. |
+| 3.4 | Draft | TBD | Resolves OI-FAW-04. Section 1.1 updated for Finance Approval Workflow. Section 3.1: Finance Review module added. Section 3.2: Finance Review API responsibilities added. Section 3.5: Finance Review data bullet added. Section 7.1: Finance approval workflow events added. Section 8: Finance Review NFR rows added. Section 9.3: Finance-side approval workflow removed from out-of-scope. |
+| 3.5 | Draft | TBD | Resolves companion amendment from Notification Mechanism Specification v1.0. Section 3.2: notification service responsibilities added. Section 3.5: obs.notifications bullet added. Section 7.1: NOTIFICATION_READ bullet added. Section 7.2: NotificationRecord and NOTIFICATION_READ examples added. Related documents updated. |
+| 3.5 — Full Restatement | Draft | TBD | Full restatement incorporating all content from v3.1 through v3.5. All sections present in full. Depends-on references updated to Glossary v1.9, Security v1.3, Notification Mechanism Specification v1.0. Supersedes all prior versions. |
+| 3.6 — Full Restatement | Draft | Claude | Databricks-free platform baseline. The Databricks workspace is no longer available; the architecture moves to an Azure-only stack. Data platform changed from Azure Databricks + Delta Lake to Azure PostgreSQL Flexible Server (§1.1, §2.1, §2.3, §3.2, §3.3, §3.4, §3.5, §7). Hosting changed from the Databricks Apps / App Service dual-track model to single-track Azure App Service; §2.2 retitled "Hosting Model" and new §2.2.1 ADR baseline (ADR-01–04) added. Batch processing changed from Databricks Workflows to Azure Functions (§2.1, §3.6, §4.2, §5.1, §5.3). Technology stack table and Azure Services table updated (§2.4, §4.2). Audit-log append-only enforcement restated as a PostgreSQL trigger; Z-ORDER and Delta MERGE references removed in favour of PostgreSQL indexes and INSERT … ON CONFLICT (§3.5, §3.6, §7.3). §6.3 retitled "Service Identity and Entra ID" for App Service and Azure Functions managed identities. Databricks-specific constraints and assumptions removed (§9.1, §9.2). |
+| 3.6.1 — Errata | Draft | Claude | Version-reference corrections per Specification Consistency & Errata Report v1.0. Depends-on, body cross-references (§3.2, §3.3, §7), and related-documents list updated: System Context and Domain Glossary v1.9 → v1.11 (ERR-02); Functional Requirements: Workforce Planning v1.0 → v1.1 (ERR-03); Data Integration Specification v1.5 → v1.6 (ERR-04); In-Application Notification Mechanism Specification v1.0 → v1.1 (ERR-05); Security and Access Control Specification v1.3 → v1.4 and UX and UI Specification v1.4 → v1.5 (ERR-08). Title-block and footer filename strings corrected to the actual filename (ERR-10). No technical content changed. |
+
+**Related documents:**
+
+- OPEX Budgeting System — System Context and Domain Glossary v1.11
+
+- OPEX Budgeting System — Security and Access Control Specification v1.4
+
+- OPEX Budgeting System — UX and UI Specification v1.5
+
+- OPEX Budgeting System — Data Integration Specification v1.6
+
+- OPEX Budgeting System — In-Application Notification Mechanism Specification v1.1
+
+- OPEX Budgeting System — Functional Requirements: Budget Planning v1.1
+
+- OPEX Budgeting System — Functional Requirements: Workforce Planning v1.1
+
+- OPEX Budgeting System — Functional Requirements: Reporting v1.1
+
+- OPEX Budgeting System — Functional Requirements: Finance Approval Workflow v1.2
+
+OBS_Application_Architecture_Specification_v3_6_Full_1.docx	Page  of
+
+Page

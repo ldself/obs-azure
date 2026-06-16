@@ -1,0 +1,428 @@
+OPEX Budgeting System  —  Claude Code Implementation Guide  —  v1.2 Draft**	CONFIDENTIAL | DRAFT**
+
+**OPEX Budgeting System**
+
+**Claude Code Implementation Guide**
+
+Version 1.2 — Draft · OBS_Claude_Code_Implementation_Guide_v1_2.docx
+
+| **Document title** | **Claude Code Implementation Guide** |
+| --- | --- |
+| **System** | OPEX Budgeting System (OBS) |
+| **Version** | 1.2 — Draft |
+| **Status** | For Review |
+| **Audience** | Claude Code |
+| **Depends on** | System Context and Domain Glossary v1.11 · Application Architecture Specification v3.6 · Security and Access Control Specification v1.4 · UX and UI Specification v1.5 · Data Integration Specification v1.6 · In-Application Notification Mechanism Specification v1.1 · Functional Requirements: Budget Planning v1.1 · Functional Requirements: Workforce Planning v1.1 · Functional Requirements: Reporting v1.1 · Functional Requirements: Finance Approval Workflow v1.2 · Build Sequencing Plan v1.1 · Local Development Environment Specification v1.1 · Project Context Handoff v2.4 |
+
+# 1. How to Use This Guide
+
+This document is written directly for Claude Code. It is the primary orientation document for the OPEX Budgeting System (OBS) implementation. Read it in full before writing any code. All decisions referenced here are final. Do not re-litigate architecture, terminology, or design decisions — consult the Project Context Handoff v2.4 if you are uncertain whether a decision has been made.
+
+## 1.1 Document Hierarchy
+
+The following documents collectively define what to build and how to build it. Consult them in this order when you need detail on any topic:
+
+| **Document** | **Version** | **What It Governs** |
+| --- | --- | --- |
+| **Project Context Handoff** | v2.4 | All decisions, all open item resolutions, authoritative reading order. Read this first in any new session. |
+| **System Context and Domain Glossary** | v1.11 | Authoritative terminology. Every term used in code, APIs, database schemas, and UI labels must match this document exactly. No synonyms. |
+| **Application Architecture Specification** | v3.6 | Technology stack, component architecture, API conventions, calculation service pattern, audit log structure, performance targets. Binding. |
+| **Security and Access Control Specification** | v1.4 | Capability flag model, cost center grant model, request authorization flow (7 steps), audit events, error response standards. Every API endpoint must implement this. |
+| **UX and UI Specification** | v1.5 | All screens, navigation model, MUI component choices, interaction patterns, acceptance criteria for all UX behaviours. |
+| **Data Integration Specification** | v1.6 | File format contracts, ingestion pipeline, PostgreSQL schemas for dimensions and actuals, quarantine and re-promotion rules. |
+| **Notification Mechanism Specification** | v1.1 | obs.notifications schema, notification service module, all 8 notification events, bell + inbox UX, deep-link routing. |
+| **FR: Budget Planning** | v1.1 | Budget versions, budget lines, overhead allocation, vendor attribution, targets, locking, submission workflow, PostgreSQL schema additions. |
+| **FR: Workforce Planning** | v1.1 | Positions, compensation calculations, lifecycle events, transfer workflow, personnel expense direct push. |
+| **FR: Reporting** | v1.1 | Report definitions, report viewer, annotations, saved filters, Excel export, report definition authoring UI. |
+| **FR: Finance Approval Workflow** | v1.2 | Finance review records, approval queue, approve/reject actions, bulk approve, version status resolution. |
+| **Build Sequencing Plan** | v1.1 | 10-phase build order with deliverables, PostgreSQL tables per phase, API endpoints per phase, acceptance criteria references. |
+| **Local Dev Environment Specification** | v1.1 | macOS toolchain, DuckDB local substitute, mock auth, repository structure, Makefile, VS Code launch configs, testing strategy. |
+
+## 1.2 Session Startup Protocol
+
+At the start of every Claude Code session, before writing any code, execute this protocol:
+
+- Search project knowledge for 'Project Context Handoff' and read the current version summary to orient to the project state.
+
+- Identify which Build Sequencing Plan phase is currently in progress.
+
+- Search project knowledge for the specific specification sections relevant to the task at hand before writing any code.
+
+- Confirm the local environment is running (make api, npm run dev) before attempting any integration test.
+
+- Never assume a decision is unmade. Search project knowledge first.
+
+# 2. Absolute Rules
+
+The following rules are non-negotiable. They apply to every line of code, every API contract, and every database schema element produced for the OBS.
+
+| **RULE 1 — Terminology is exact.**** Every identifier in code (variable names, function names, column names, enum values, API path segments, UI labels) must use the exact term from the System Context and Domain Glossary v1.11. Do not introduce synonyms. Do not abbreviate terms not already abbreviated in the glossary. Examples: use cost_center_id, not cc_id or costCenterId. Use is_finance_reviewer, not finance_reviewer_flag. Use ALL_WRITE, not write_access.** |
+| --- |
+
+| **RULE 2 — Architecture decisions are final.**** The technology stack, hosting model, authentication approach, data platform, and all decisions recorded in the Project Context Handoff v2.4 are final. Do not propose alternative frameworks, databases, or approaches. Implement what is specified. If you believe a specification contains an error or contradiction, stop and raise it as a question rather than making a unilateral change.** |
+| --- |
+
+| **RULE 3 — The frontend is a display layer only.**** No authoritative business logic lives in the frontend. No calculation result is trusted unless it came from the server-side calculation service. The frontend may show optimistic estimates while a server response is in flight. It must always reconcile to the server result. The frontend never constructs SQL, never reads the database directly, and never owns grant enforcement logic.** |
+| --- |
+
+| **RULE 4 — Business rules are stored as data, never hardcoded.**** No compensation rate, merit percentage, overhead allocation rate, or salary cap value may appear as a literal in application code. All such values are read from the obs.* configuration tables (obs.merit_increase_rates, obs.compensation_burden_rates, obs.compensation_component_mappings, obs.overhead_allocation_rates) at runtime.** |
+| --- |
+
+| **RULE 5 — Every API endpoint enforces the full 7-step authorization flow.**** Step 1: Validate Entra ID access token (or mock token in local env). HTTP 401 on failure. Step 2: Resolve user in obs.users; check is_active = TRUE. HTTP 403 on failure. Step 3: If is_administrator = TRUE, grant full access and skip Steps 4–6. Step 4: Check required capability flags for the operation class. HTTP 403 on failure. Step 5: Check cost center scope. HTTP 403 on failure. Step 6: Check standard grant (ALL_WRITE for writes) and confidential grant for compensation fields. Strip fields or HTTP 403 on failure. Step 7: Execute operation and write audit log entry. Never return HTTP 404 to obscure a resource from an unauthorized user — use HTTP 403.** |
+| --- |
+
+| **RULE 6 — Every mutation writes an audit event.**** Every create, update, and delete operation writes an append-only record to obs.audit_log. The audit log is never modified after write. No UPDATE or DELETE is ever issued against obs.audit_log. Audit events are written synchronously within the same API call as the mutation. If the audit write fails, the mutation must also fail (transaction rollback).** |
+| --- |
+
+| **RULE 7 — Notification failures are non-fatal.**** obs.notifications writes are wrapped in try/except. A notification write failure must not roll back the triggering event. Log WARNING on failure. The triggering API call returns success regardless.** |
+| --- |
+
+| **RULE 8 — The LOCAL_AUTH_BYPASS safety constraint.**** LOCAL_AUTH_BYPASS=true is permitted only on localhost. A startup assertion must raise an error if LOCAL_AUTH_BYPASS=true and the host is not localhost. LOCAL_AUTH_BYPASS cannot be set via an API call, a request header, or any runtime mechanism — it is environment variable only, read once at startup.** |
+| --- |
+
+| **RULE 9 — OBS never writes to source systems.**** No code path may write to the accounting system or HR admin system under any circumstance. obs.expense_accounts and obs.account_hierarchy_nodes have no UPDATE or DELETE API endpoints. Return HTTP 405 for any write attempt.** |
+| --- |
+
+| **RULE 10 — All ingestion operations are idempotent.**** Running the same file through the ingestion pipeline twice must produce the same result. No duplicate records. PostgreSQL INSERT … ON CONFLICT DO UPDATE (atomic upsert) is the required promotion mechanism. Never use INSERT without deduplication logic. Use SHA-256 content hash + file name as the deduplication key in obs.ingestion_control.** |
+| --- |
+
+# 3. Technology Stack Quick Reference
+
+Never deviate from this stack. All decisions are final.
+
+| **Layer** | **Technology** | **Key Constraint** |
+| --- | --- | --- |
+| **Frontend framework** | React 18 + TypeScript | Strict TypeScript — no any types in production code. All component props must be typed. |
+| **Frontend build** | Vite | vite.config.ts proxies /api/* to localhost:8000 in development. |
+| **UI component library** | MUI (Material UI) v5 | Use MUI components as specified in UX spec. Do not substitute third-party component alternatives. |
+| **Drag and drop** | @hello-pangea/dnd | Required for Report Column reordering in ColumnConfigurator.tsx (Reporting FR Section 5, UX Spec Section 7.6). |
+| **Frontend mock API** | MSW (Mock Service Worker) | Activated by VITE_API_MOCK=true. Handlers in frontend/src/mocks/handlers.ts. |
+| **Backend framework** | Python 3.11 + FastAPI | Stateless REST API. All business logic server-side. |
+| **ASGI server (local)** | Uvicorn | uvicorn backend.app.main:app --reload --port 8000 |
+| **Local database** | DuckDB ≥ 0.10 | Activated by DB_ENGINE=duckdb. All obs.* schemas identical to PostgreSQL production schemas. |
+| **Production database** | Azure PostgreSQL Flexible Server | Activated by DB_ENGINE=postgresql. Same query logic as DuckDB path. |
+| **Excel export** | openpyxl | Server-side only. Never client-side. See Reporting FR Section 11. |
+| **Linter (Python)** | Ruff | Replaces Flake8 + Black. Run via make lint. |
+| **Linter (TypeScript)** | ESLint + Prettier |  |
+| **Type checker (Python)** | mypy | Run via make typecheck. |
+| **Test runner** | pytest + pytest-asyncio | Unit tests: no running services. Integration tests: require live local API. |
+| **HTTP test client** | httpx | Used in integration tests for real HTTP requests to the running local API. |
+
+# 4. Repository Structure and File Conventions
+
+Follow this structure exactly. Do not create top-level directories not listed here without explicit instruction.
+
+| **obs/ ├── backend/ │   ├── app/ │   │   ├── main.py                    # FastAPI app factory; registers all routers │   │   ├── config.py                  # Settings (pydantic-settings); reads .env.local │   │   ├── auth/ │   │   │   ├── middleware.py          # get_current_user() dependency — real + mock paths │   │   │   └── models.py              # CurrentUser dataclass │   │   ├── db/ │   │   │   ├── engine.py              # get_connection() — branches on DB_ENGINE │   │   │   └── helpers.py             # merge(), audit_write(), paginate() │   │   ├── routers/                   # One file per domain area │   │   │   ├── users.py               # /api/v1/users, /api/v1/me │   │   │   ├── cost_centers.py        # /api/v1/cost-centers │   │   │   ├── budget_versions.py     # /api/v1/budget-versions │   │   │   ├── budget_lines.py        # /api/v1/budget-lines │   │   │   ├── positions.py           # /api/v1/positions │   │   │   ├── transfers.py           # /api/v1/transfers │   │   │   ├── finance_review.py      # /api/v1/finance-review │   │   │   ├── notifications.py       # /api/v1/notifications │   │   │   ├── reports.py             # /api/v1/report-definitions, /api/v1/reports │   │   │   ├── business_rules.py      # /api/v1/merit-increase-rates, burden-rates, etc. │   │   │   └── ingestion.py           # /api/v1/ingestion (monitoring endpoints) │   │   ├── services/ │   │   │   ├── calculation_service.py # Dry-run + save; no direct DB writes except via helper │   │   │   ├── notification_service.py# create_notification(), create_notifications_bulk() │   │   │   ├── export_service.py      # Excel export via openpyxl │   │   │   └── ingestion/             # Pipeline logic (no host-specific deps) │   │   │       ├── actuals_pipeline.py │   │   │       ├── employees_pipeline.py │   │   │       └── hierarchy_pipeline.py │   │   └── models/                    # Pydantic request/response models; one file per domain │   ├── tests/ │   │   ├── unit/                      # No running services required │   │   ├── integration/               # Require live local API │   │   ├── fixtures/                  # Sample CSV/Excel files for pipeline tests │   │   └── ac_registry.yaml           # AC-***** to test function mapping │   ├── requirements.txt │   └── requirements-dev.txt ├── frontend/ │   ├── src/ │   │   ├── components/                # Mirrors UX spec module structure │   │   │   ├── layout/                # AppShell, NotificationBell, NotificationInbox │   │   │   ├── budget/                # Budget entry grid, version selector, workflow │   │   │   ├── workforce/             # Headcount grid, position forms │   │   │   ├── reporting/             # Report viewer, ColumnConfigurator │   │   │   ├── finance-review/        # Approval queue, review detail │   │   │   └── admin/                 # All admin screens │   │   ├── contexts/ │   │   │   ├── ObsUserContext.tsx     # Identity, capability flags — NOT notification state │   │   │   └── BudgetWorkflowContext.tsx # Session-only; not persisted to server │   │   ├── hooks/                     # Custom hooks (useBudgetVersion, usePositions, etc.) │   │   ├── services/                  # API client functions (one file per domain) │   │   ├── types/                     # TypeScript interfaces matching Pydantic models │   │   └── mocks/                     # MSW handlers (dev only) │   ├── vite.config.ts │   ├── tsconfig.json │   └── package.json ├── schema/ │   ├── bootstrap.sql                  # CREATE TABLE IF NOT EXISTS for all obs.***** tables │   └── seed/                          # 01_users.sql ... 07_actuals.sql ├── local-data/                        # git-ignored ├── .vscode/ ├── .env.local.example ├── .gitignore ├── Makefile └── README.md** |
+| --- |
+
+# 5. Backend Implementation Patterns
+
+Apply these patterns consistently across all routers and services.
+
+## 5.1 Router Pattern
+
+Every router follows this structure. Never put business logic in a router function — delegate to a service.
+
+| **# backend/app/routers/budget_versions.py from fastapi import APIRouter, Depends, HTTPException from app.auth.middleware import get_current_user from app.auth.models import CurrentUser from app.db.engine import get_connection from app.models.budget import BudgetVersionResponse, CreateBudgetVersionRequest from app.services import budget_service router = APIRouter(prefix=****'****/api/v1/budget-versions****'****, tags=[****'****budget-versions****'****]) @router.get(****'****/{version_id}****'****, response_model=BudgetVersionResponse) async def get_budget_version(     version_id: str,     current_user: CurrentUser = Depends(get_current_user),     conn = Depends(get_connection), ):     # Authorization enforced inside service — passes current_user for scope checks     return budget_service.get_version(conn, version_id, current_user)** |
+| --- |
+
+## 5.2 Authorization Enforcement Pattern
+
+Authorization is enforced as a reusable dependency and inside service functions. Never inline authorization checks in routers without a named helper.
+
+| **# backend/app/auth/middleware.py from app.db.helpers import get_user_record from app.config import settings def get_current_user(conn=Depends(get_connection)) -****>**** CurrentUser:     if settings.LOCAL_AUTH_BYPASS:         # Startup assertion elsewhere guarantees this only runs on localhost         return CurrentUser(             user_id=settings.LOCAL_AUTH_USER_ID,             email=settings.LOCAL_AUTH_USER_EMAIL,             display_name=settings.LOCAL_AUTH_USER_NAME,         )     token = _validate_entra_token()          # raises HTTP 401 on failure     user  = get_user_record(conn, token.oid) # raises HTTP 403 if not found / inactive     return user # backend/app/db/helpers.py — authorization helpers def require_administrator(user: CurrentUser):     if not user.is_administrator:         raise HTTPException(status_code=403, detail=****'****Administrator access required****'****) def require_cost_center_access(user: CurrentUser, cost_center_id: str, conn,                                 write: bool = False, confidential: bool = False):     if user.is_administrator:         return  # administrators have implicit access     # ... resolve grants, check scope, strip confidential fields ...** |
+| --- |
+
+## 5.3 Audit Write Pattern
+
+Every mutation calls audit_write() as the final step inside the same database transaction. If audit_write() fails, the transaction rolls back.
+
+| **# backend/app/db/helpers.py import uuid, datetime def audit_write(conn, event_type: str, user_id: str, entity_type: str,                entity_id: str, previous_value=None, new_value=None, **kwargs):     conn.execute(         ****'****INSERT INTO obs.audit_log VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)****'****,         [str(uuid.uuid4()), datetime.datetime.utcnow(), event_type, user_id,          kwargs.get(****'****session_id****'****), entity_type, entity_id,          json.dumps(previous_value), json.dumps(new_value),          kwargs.get(****'****ip_address****'****), ****'****SUCCESS****'****]     )     # obs.audit_log is append-only — never call UPDATE or DELETE on it** |
+| --- |
+
+## 5.4 Database Abstraction (DuckDB / PostgreSQL)
+
+All queries must work identically against both DB_ENGINE=duckdb (local) and DB_ENGINE=postgresql (production). The only code that differs is inside engine.py.
+
+| **# backend/app/db/engine.py from app.config import settings import duckdb def get_connection():     if settings.DB_ENGINE == ****'****duckdb****'****:         conn = duckdb.connect(settings.DUCKDB_PATH)         yield conn         conn.close()     elif settings.DB_ENGINE == ****'****postgresql****'****:         # production: direct PostgreSQL connection         import psycopg2, psycopg2.extras         conn = psycopg2.connect(settings.PG_CONNECTION_STRING, cursor_factory=psycopg2.extras.RealDictCursor)         ... # backend/app/db/helpers.py def merge(conn, table: str, records: list, key_cols: list):     ****'****'****'****Idempotent upsert. Uses DELETE+INSERT on DuckDB, INSERT ... ON CONFLICT DO UPDATE on PostgreSQL.****'****'****'****     if settings.DB_ENGINE == ****'****duckdb****'****:         _duckdb_upsert(conn, table, records, key_cols)     elif settings.DB_ENGINE == ****'****postgresql****'****:         _pg_upsert(conn, table, records, key_cols)     else:         raise RuntimeError(f****'****merge() not supported for DB_ENGINE={settings.DB_ENGINE!r}****'****)** |
+| --- |
+
+## 5.5 Calculation Service Pattern
+
+The calculation service exposes a dry-run endpoint and a separate save endpoint. Never combine calculation and persistence in one endpoint.
+
+| **# Pattern for every calculation: dry-run first, save separate # POST /api/v1/workforce-planning/calculate  (dry-run — no side effects) #   Body: { cost_center_id, fiscal_year, positions: [...] } #   Returns: calculated amounts for all positions, all periods #   No DB writes. No audit event. # POST /api/v1/workforce-planning/save  (persists + triggers budget line push) #   Same body as /calculate #   Saves to obs.positions #   Triggers direct push to obs.budget_lines (synchronous, same API call) #   Writes WORKFORCE_PLAN_SAVED audit event #   Requires ALL_WRITE confidential grant or Administrator # All business rule values are read from DB at calculation time: #   obs.merit_increase_rates  (rate_pct for fiscal_year) #   obs.compensation_burden_rates  (7 components + wage caps for fiscal_year) #   obs.compensation_component_mappings  (component_code → account_code)** |
+| --- |
+
+## 5.6 Notification Service Pattern
+
+| **# backend/app/services/notification_service.py import logging logger = logging.getLogger(__name__) def create_notification(conn, user_id: str, event_type: str,                         title: str, body: str, deep_link_url: str,                         source_entity_type: str, source_entity_id: str,                         expires_at=None):     try:         conn.execute(             ****'****INSERT INTO obs.notifications VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)****'****,             [str(uuid.uuid4()), user_id, event_type, title, body,              deep_link_url, False, None, source_entity_type,              source_entity_id, expires_at]         )     except Exception as e:         logger.warning(f****'****Notification write failed (non-fatal): {e}****'****)         # Do NOT re-raise — notification failures must not roll back the triggering event def create_notifications_bulk(conn, notifications: list[dict]):     for n in notifications:         create_notification(conn, **n)  # each wrapped individually** |
+| --- |
+
+# 6. Frontend Implementation Patterns
+
+## 6.1 Component File Conventions
+
+Every React component follows these conventions:
+
+- One component per file. File name matches component name (PascalCase.tsx).
+
+- All props must have TypeScript interfaces. No implicit any.
+
+- Use MUI components as specified in the UX Specification. Do not substitute alternatives.
+
+- Never put API call logic directly in a component — use a custom hook or a service function from services/.
+
+- Never store notification state in ObsUserContext — the context is for identity and capability flags only.
+
+- BudgetWorkflowContext is session-only. It is not persisted to the server. It resets on page refresh.
+
+## 6.2 API Client Pattern
+
+| **// frontend/src/services/budgetService.ts const API_BASE = import.meta.env.VITE_API_BASE_URL ?? ****'****'****; async function apiFetch****<****T****>****(path: string, options?: RequestInit): Promise****<****T****>**** {   const res = await fetch(****${API_BASE}${path}****, {     ...options,     headers: { ****'****Content-Type****'****: ****'****application/json****'****, ...options?.headers },   });   if (!res.ok) {     const err = await res.json().catch(() =****>**** ({ detail: res.statusText }));     throw new ApiError(res.status, err.detail ?? ****'****Unknown error****'****);   }   return res.json(); } export const budgetService = {   getVersion: (versionId: string) =****>****     apiFetch****<****BudgetVersionResponse****>****(****/api/v1/budget-versions/${versionId}****),   // ... other methods };** |
+| --- |
+
+## 6.3 Notification Bell Polling
+
+| **// frontend/src/components/layout/NotificationBell.tsx // Poll GET /api/v1/notifications?unread_only=true****&****page_size=1 // Pause polling when document.visibilityState === ****'****hidden****'**** // Resume + immediate fetch on tab becoming visible // Store unread count in local React state — NOT in ObsUserContext // Optimistic update: mark-one-read decrements count by 1 (floor 0) //                   mark-all-read sets count to 0 // Interval configured by NOTIFICATION_POLL_INTERVAL_SECONDS (default 60s)** |
+| --- |
+
+## 6.4 Report Column Configurator
+
+| **// frontend/src/components/reporting/ColumnConfigurator.tsx // Uses @hello-pangea/dnd for drag-and-drop reordering // Two arrays in state: availableColumns, reportColumns // On Add:    move item from available → report (append to end) // On Remove: move item from report → available (sorted by display_name) //            Remove button disabled when reportColumns.length === 1 // On Reorder: update reportColumns array order via drag result // On Default Visible toggle: update reportColumns[i].default_visible // On Save: serialize reportColumns → JSON → include in PATCH body as available_columns // Validation: at least one column with default_visible = TRUE //   Inline message if all toggles set to FALSE: //   ****'****At least one column must be visible by default.****'** |
+| --- |
+
+# 7. PostgreSQL / DuckDB Schema Rules
+
+The schema/bootstrap.sql file defines all obs.* tables. Follow these rules when writing or amending schema definitions:
+
+- All primary keys are STRING (UUID) unless the specification states otherwise.
+
+- All timestamps are stored in UTC. Column type: TIMESTAMP.
+
+- All monetary amounts are stored as DECIMAL(15,2).
+
+- All percentage rates are stored as DECIMAL(6,4) (supports values like 0.0765 for 7.65%).
+
+- All boolean columns default to FALSE unless the specification states otherwise.
+
+- obs.audit_log is append-only. It has no UPDATE or DELETE endpoints and no application code may issue UPDATE/DELETE against it.
+
+- obs.notifications is NOT an audit log. is_read and read_at are the only mutable columns after insert.
+
+- obs.expense_accounts and obs.account_hierarchy_nodes are read-only via the API. HTTP 405 for any write attempt through the API layer.
+
+## 7.1 DuckDB Upsert Substitute and PostgreSQL Upsert
+
+PostgreSQL supports native INSERT … ON CONFLICT DO UPDATE. DuckDB does not. The db/helpers.py merge() function implements DELETE + INSERT for DuckDB and INSERT … ON CONFLICT DO UPDATE for PostgreSQL (_pg_upsert, the canonical implementation defined in Azure Cloud Migration Specification v2.0 Section 6.4):
+
+| **def _duckdb_upsert(conn, table: str, records: list, key_cols: list):     if not records:         return     # Build WHERE clause from key columns     where = ****'**** AND ****'****.join(f****'****{k} = ?****'**** for k in key_cols)     for record in records:         key_values = [record[k] for k in key_cols]         conn.execute(f****'****DELETE FROM {table} WHERE {where}****'****, key_values)     # Bulk insert     cols = list(records[0].keys())     placeholders = ****'****, ****'****.join(****'****?****'**** * len(cols))     col_names = ****'****, ****'****.join(cols)     conn.executemany(         f****'****INSERT INTO {table} ({col_names}) VALUES ({placeholders})****'****,         [[r[c] for c in cols] for r in records]     )** |
+| --- |
+
+# 8. API Contract Standards
+
+All API endpoints conform to these standards. Do not deviate.
+
+## 8.1 URL and Method Conventions
+
+| **Convention** | **Rule** | **Example** |
+| --- | --- | --- |
+| **Path segments** | kebab-case | /api/v1/finance-review, /api/v1/budget-versions |
+| **Resource IDs** | Path parameter named {resource_id} | /api/v1/positions/{position_id} |
+| **Collection reads** | GET on the collection path | GET /api/v1/positions |
+| **Single resource** | GET on the resource path | GET /api/v1/positions/{position_id} |
+| **Create** | POST on the collection path | POST /api/v1/positions |
+| **Partial update** | PATCH on the resource path | PATCH /api/v1/positions/{position_id} |
+| **Actions** | POST on action sub-path | POST /api/v1/transfers/{id}/approve |
+| **All versions** | /api/v1/ prefix on all endpoints | No /api/v2/ exists in this system |
+
+## 8.2 Error Response Format
+
+| **# All error responses use this format: { ****'****detail****'****: ****'****Human-readable description of the error****'**** } # HTTP 401 — Token missing, expired, or invalid # HTTP 403 — Authenticated but not authorized (insufficient flags, scope, or grant) # HTTP 404 — Resource does not exist AND user would have access if it did #           NEVER return 404 to obscure a resource from an unauthorized user — use 403 # HTTP 409 — State conflict (e.g., cloning to an existing version name, deleting active version) # HTTP 422 — Validation failure (missing required fields, invalid values) # HTTP 405 — Method not allowed (e.g., write attempt on account hierarchy endpoints)** |
+| --- |
+
+## 8.3 Pagination Standard
+
+| **# All list endpoints that may return ****>**** 50 records support pagination: # Query params: page (INT, 1-based, default 1), page_size (INT, default 50, max 200) # Response envelope: {   ****'****total_count****'****: 142,   ****'****page****'****: 1,   ****'****page_size****'****: 50,   ****'****results****'****: [ /***** array of items *****/ ] }** |
+| --- |
+
+## 8.4 Confidential Field Enforcement
+
+Compensation fields (base_salary, burden_rate, derived compensation components, total employment cost) must be absent from response payloads — not null, absent — when the requesting user holds ALL_NONE confidential grant on the relevant cost center. This is enforced at the API response layer, not the query layer.
+
+| **# backend/app/db/helpers.py CONFIDENTIAL_FIELDS = {     ****'****base_salary****'****, ****'****salary_adjustment****'****, ****'****aipeip_bonus****'****, ****'****other_bonus****'****,     ****'****burden_fica****'****, ****'****burden_medicare****'****, ****'****burden_suta****'****, ****'****burden_futa****'****,     ****'****burden_federal_income_tax****'****, ****'****burden_state_income_tax****'****, ****'****burden_other_benefits****'****,     ****'****total_employment_cost****'****, } def strip_confidential(record: dict, user: CurrentUser, cost_center_id: str) -****>**** dict:     if user.is_administrator:         return record     grant = get_confidential_grant(user, cost_center_id)     if grant == ****'****ALL_NONE****'****:         return {k: v for k, v in record.items() if k not in CONFIDENTIAL_FIELDS}     return record** |
+| --- |
+
+# 9. Key Calculation Rules Quick Reference
+
+The full calculation rules are in Functional Requirements: Workforce Planning v1.1 Sections 5.1–5.3. This section provides a quick reference for the most critical rules. Always verify against the specification for full detail.
+
+## 9.1 Salary Expense by Period
+
+| **Period** | **Base Amount Used** | **Proration** |
+| --- | --- | --- |
+| **January (Period 1)** | base_salary only | Prorated by days active in January |
+| **February (Period 2)** | base_salary only | Prorated by days active in February |
+| **March–December (3–12)** | new_annual_salary (base + merit + adjustment) | Prorated by days active in each period |
+
+| **# new_annual_salary = base_salary + merit_increase_amount + salary_adjustment # merit_increase_amount = base_salary ***** (merit_rate_pct / 100) # merit_rate_pct comes from obs.merit_increase_rates for the fiscal_year # proration_factor_m = days_active_in_month_m / days_in_month_m # days_active = MIN(last_day_of_month, end_date or last_day_of_year) #             - MAX(first_day_of_month, start_date) + 1 # If days_active ******<******= 0, proration_factor = 0 # monthly_salary_m = (annual_salary_for_period / 12) ***** proration_factor_m # Round to 2 decimal places** |
+| --- |
+
+## 9.2 AIPEIP Bonus Proration Rules
+
+- Active positions: AIPEIP bonus is not prorated by month. Full annual amount across all active periods.
+
+- Termination: AIPEIP bonus is zeroed for the entire fiscal year (all 12 periods).
+
+- Retirement: AIPEIP bonus is prorated through the retirement month. Months after the retirement effective_date are zero.
+
+- Proration for retirement: monthly_aipeip_m = (aipeip_bonus / 12) for months 1 through retirement month; 0 thereafter.
+
+## 9.3 Burden Rate Calculation
+
+| **# For each burden component c: #   If component has a wage cap (FICA, SUTA, FUTA): #     burdened_salary_c = MIN(new_annual_salary, wage_cap_c) #   Else (Medicare, state income tax, federal income tax, other benefits): #     burdened_salary_c = new_annual_salary # annual_burden_c = burdened_salary_c ***** (rate_pct_c / 100) ***** fte # monthly_burden_c_m = (annual_burden_c / 12) * proration_factor_m # Round each component monthly amount to 2 decimal places # Each component maps to a separate budget line via obs.compensation_component_mappings # component_code examples: ****'****burden_fica****'****, ****'****burden_medicare****'****, ****'****burden_suta****'****, etc.** |
+| --- |
+
+## 9.4 Direct Push to Budget Lines
+
+Every position save triggers a synchronous direct push. This is not a background job.
+
+| **# After saving to obs.positions: # For each position in the cost center (for the fiscal_year): #   For each planning period m (1..12): #     For each compensation component c: #       Compute amount per Section 5 rules #       Write/update obs.budget_lines with: #         is_calculated = TRUE #         source = ****'****workforce_planning****'**** #         account_code = obs.compensation_component_mappings[c].account_code # Use merge() — not INSERT — to handle updates to existing lines # If a component mapping is missing, skip and log WARNING (do not fail the save)** |
+| --- |
+
+# 10. Ingestion Pipeline Rules
+
+The full pipeline specification is in Data Integration Specification v1.6. These are the critical rules Claude Code must not get wrong.
+
+| **Rule** | **Behaviour** | **Specification Reference** |
+| --- | --- | --- |
+| **File deduplication** | SHA-256 of raw file bytes + file_name. Same content = process once. Computed before any parsing. | DI Spec v1.5 Section 7.2 |
+| **Sheet selection — Excel** | Actuals: sheet named 'Budget-Accounting'. Employees: sheet named 'Budget-HR'. Reject if named sheet absent. | DI Spec v1.5 Section 2.3 |
+| **Non-USD currency** | Actuals records with currency != 'USD' are rejected and quarantined as malformed. Not warned, not promoted. | DI Spec v1.5 Section 3.2 (OI-DI-03) |
+| **Error rate threshold** | If invalid rows > 80% of total rows: reject entire file. If <= 80%: promote valid rows, quarantine invalid. | DI Spec v1.5 Section 7.3.3 |
+| **Quarantine re-promotion** | Automatic — when an Administrator adds a missing dimension, the pipeline detects the resolution and re-promotes without manual trigger. | DI Spec v1.5 Section 7.4 (OI-DI-05) |
+| **Alert channels** | Pipeline alert events notify both Microsoft Teams (incoming webhook) AND Email. Both required. Console-only in local env. | DI Spec v1.5 Section 9 (OI-DI-04) |
+| **Post-seed hierarchy** | After initial cost center hierarchy seed, re-import of hierarchy files is not supported. API returns HTTP 405. | DI Spec v1.5 (OI-DI-06) |
+| **Import sequencing** | Account hierarchy and actuals operate on independent schedules. Quarantine handles sequencing gaps. | DI Spec v1.5 Section 6.6 (OI-DI-07) |
+
+# 11. Testing Requirements
+
+Testing requirements are fully specified in the Local Development Environment Specification v1.1 Section 10. This section provides the key constraints Claude Code must observe.
+
+## 11.1 AC Registry
+
+Every AC-* identifier from every specification must have an entry in backend/tests/ac_registry.yaml. The make ac-coverage command must exit 0 before any phase is considered complete.
+
+| **# backend/tests/ac_registry.yaml — required format AC-CAP-01:   file: integration/test_auth.py   test: test_administrator_has_full_access   phase: 1 AC-DI-55:   file: integration/test_pipeline.py   test: test_non_usd_records_rejected_and_quarantined   phase: 2** |
+| --- |
+
+## 11.2 Calculation Service — 100% Unit Test Coverage
+
+The calculation service has a 100% line coverage requirement. Every compensation calculation rule, proration formula, merit rate application, burden rate formula, wage cap, and AIPEIP proration case must have a dedicated unit test. Use pytest parametrize to cover boundary conditions (e.g., position starting on the first day of a month, last day of a month, spanning the March merit effective date).
+
+## 11.3 Integration Test Database Isolation
+
+Integration tests use local-data/obs-test.duckdb — never local-data/obs.duckdb. The test database is bootstrapped and seeded fresh at the start of each test session via a session-scoped pytest fixture. Individual tests use transaction rollback or targeted cleanup to restore state between tests.
+
+# 12. Compensation Burden Components Reference
+
+These are the exact component_code values used in obs.compensation_component_mappings and in obs.budget_lines. Use them exactly — do not abbreviate or rename.
+
+| **component_code** | **Wage Cap Applies?** | **Rate Source Column in obs.compensation_burden_rates** |
+| --- | --- | --- |
+| **salary** | N/A — not a burden component | N/A — mapped via obs.compensation_component_mappings |
+| **aipeip_bonus** | N/A | N/A |
+| **other_bonus** | N/A | N/A |
+| **burden_fica** | Yes — fica_wage_cap | fica_rate_pct |
+| **burden_medicare** | No | medicare_rate_pct |
+| **burden_suta** | Yes — suta_wage_cap | suta_rate_pct |
+| **burden_futa** | Yes — futa_wage_cap | futa_rate_pct |
+| **burden_state_income_tax** | No | state_income_tax_rate_pct |
+| **burden_federal_income_tax** | No | federal_income_tax_rate_pct |
+| **burden_other_benefits** | No | other_benefits_rate_pct |
+
+# 13. Finance Approval Workflow — resolve_budget_version_status()
+
+This server-side helper is called after every approve or reject action. It must be implemented as a discrete function — not inlined in the approve/reject route handlers.
+
+| **def resolve_budget_version_status(conn, version_id: str):     ****'****'****'****     Called after every approve or reject action.     Evaluates all obs.finance_review_records for the version.     Transitions obs.budget_versions.status if all records have resolved.     ****'****'****'****     records = conn.execute(         ****'****SELECT status FROM obs.finance_review_records WHERE version_id = ?****'****,         [version_id]     ).fetchall()     statuses = {r[0] for r in records}     if ****'****pending****'**** in statuses:         return  # still waiting — no version status change     if ****'****rejected****'**** in statuses:         # At least one rejection and no pending — version is rejected         _set_version_status(conn, version_id, ****'****Rejected****'****)         audit_write(conn, ****'****BUDGET_VERSION_REJECTED****'****, ****'****system****'****, ****'****BudgetVersion****'****, version_id)     else:         # All approved         _set_version_status(conn, version_id, ****'****Approved****'****)         audit_write(conn, ****'****BUDGET_VERSION_APPROVED****'****, ****'****system****'****, ****'****BudgetVersion****'****, version_id)** |
+| --- |
+
+# 14. Phase Gate Checklist
+
+Before declaring any phase complete, verify all items on this checklist. No phase may be marked complete with any unchecked item.
+
+## 14.1 Per-Phase Gate
+
+- All deliverables listed in Build Sequencing Plan v1.1 for the phase are implemented.
+
+- All API endpoints listed in the phase are implemented and return correct responses.
+
+- All PostgreSQL tables listed in the phase exist with correct schemas (run make db-bootstrap and verify).
+
+- make test-unit passes with 0 failures. Calculation service has 100% line coverage (Phase 4 onwards).
+
+- make test-integration passes with 0 failures.
+
+- make ac-coverage exits 0 (all AC-* identifiers for this phase are registered and passing).
+
+- make lint passes with 0 errors (Python ruff + TypeScript ESLint).
+
+- make typecheck passes with 0 errors (mypy + tsc --noEmit).
+
+- No hardcoded rate values, no LOCAL_AUTH_BYPASS in non-local code paths.
+
+- Every mutation in this phase writes the correct audit event — verified by integration test querying obs.audit_log.
+
+## 14.2 Additional Gates — Specific Phases
+
+| **Phase** | **Additional Gate** | **Verification Method** |
+| --- | --- | --- |
+| **Phase 0** | All 29 obs.* tables exist and are queryable | make db-bootstrap; SELECT count(*) from each table |
+| **Phase 1** | Last-active-Administrator guard enforced | Integration test: attempt to deactivate the only admin — expect HTTP 409 |
+| **Phase 2** | Ingestion pipeline idempotency verified | Run same fixture file twice; row count unchanged |
+| **Phase 4** | Personnel expense direct push is synchronous | Integration test: save position; immediately query obs.budget_lines |
+| **Phase 4** | Transfer expiry background logic sets correct status | Unit test with mocked clock advancing 3+ days |
+| **Phase 5** | Permanent version delete is transactional | Integration test: verify budget_lines, targets, vendor_line_items all removed |
+| **Phase 6** | resolve_budget_version_status() tested for all state combinations | Unit tests: all approved; mixed approved+rejected; some pending |
+| **Phase 7** | Notification failures do not roll back triggering event | Integration test: simulate notification write error; triggering event succeeds |
+| **Phase 8** | Excel export confidential field exclusion | Integration test: export as user with ALL_NONE grant; verify absent columns |
+| **Phase 10** | API deploys to Azure App Service and starts cleanly under production configuration | Deploy to App Service; run make test-integration against the deployed target |
+
+# 15. Common Pitfalls — Do Not Do These
+
+| **Do not use HTTP 404 to hide unauthorized resources.**** Always return HTTP 403 when a resource exists but the user is not authorized. HTTP 404 is only for genuinely non-existent resources that the user would have access to if they existed.** |
+| --- |
+
+| **Do not hardcode any rate, cap, or mapping value.**** Every numeric business rule comes from the database. obs.merit_increase_rates, obs.compensation_burden_rates, obs.compensation_component_mappings, obs.overhead_allocation_rates. No literals.** |
+| --- |
+
+| **Do not combine the dry-run calculation and the save in one endpoint.**** The calculation service must expose POST /calculate (no side effects) and POST /save (persists + audits) as separate endpoints. The frontend calls /calculate on field changes and /save only on explicit user action.** |
+| --- |
+
+| **Do not write UPDATE or DELETE against obs.audit_log.**** The audit log is append-only. No application code path may issue UPDATE or DELETE on obs.audit_log under any circumstance. If you find yourself needing to do this, you have made a design error.** |
+| --- |
+
+| **Do not put notification state in ObsUserContext.**** ObsUserContext holds identity and capability flags only. Notification state (unread_count, inbox items) lives in local React state within NotificationBell.tsx.** |
+| --- |
+
+| **Do not allow LOCAL_AUTH_BYPASS outside localhost.**** The startup check must run at application boot, not at request time. If settings.LOCAL_AUTH_BYPASS is True and the application is not on localhost, raise an exception and refuse to start.** |
+| --- |
+
+| **Do not accept user_id as a query parameter in GET /api/v1/notifications.**** The notification API always injects WHERE user_id = :authenticated_user_id server-side. A user parameter in the query string would allow cross-user notification access and is a security vulnerability.** |
+| --- |
+
+| **Do not use WidthType.PERCENTAGE in any docx generation (openpyxl export).**** Excel column widths must use explicit numeric values. Percentage-based widths are incompatible with some consumers. This applies to the openpyxl Excel export service.** |
+| --- |
+
+# 16. Document Control
+
+| **Version** | **Status** | **Date** | **Change Summary** |
+| --- | --- | --- | --- |
+| **1.0** | Draft | TBD | Initial version. Establishes Claude Code orientation protocol, 10 absolute rules, technology stack quick reference, repository structure, backend and frontend implementation patterns, Delta Lake/DuckDB schema rules, API contract standards, key calculation rules, ingestion pipeline rules, testing requirements, compensation burden component reference, resolve_budget_version_status() contract, per-phase gate checklist, and common pitfalls. |
+| **1.1** | Draft | Claude | Databricks-free platform cascade aligned to Architecture Spec v3.6. Production database changed from Azure Databricks + Delta Lake to Azure PostgreSQL Flexible Server; DB_ENGINE production value changed from delta to postgresql. §5.4 retitled "Database Abstraction (DuckDB / PostgreSQL)" and the engine.py / helpers.py excerpt updated — the delta branch became a postgresql (psycopg2) branch and _delta_merge() was replaced by _pg_upsert(), the canonical implementation from Azure Cloud Migration Specification v2.0 §6.4. §7 retitled "PostgreSQL / DuckDB Schema Rules"; §7.1 reframed around the PostgreSQL upsert and the DuckDB DELETE + INSERT substitute. RULE 10 idempotency mechanism changed to PostgreSQL INSERT … ON CONFLICT DO UPDATE. Phase 10 gate changed from dual-host deployment to single App Service deployment. Source-document and depends-on references updated to Architecture v3.6, Security v1.4, UX/UI v1.5, Data Integration v1.6, Build Sequencing Plan v1.1, Local Dev Environment Spec v1.1. |
+| **1.2** | Draft | Claude | Version-reference corrections per Specification Consistency & Errata Report v1.0. Updated stale references in the §1.1 document-hierarchy table, depends-on header, RULE 1, RULE 2, §9 calculation cross-reference, §13 testing cross-reference, and §14.1 phase-gate prose: System Context and Domain Glossary v1.9 → v1.11 (ERR-02); Functional Requirements: Workforce Planning v1.0 → v1.1 (ERR-03); In-Application Notification Mechanism Specification v1.0 → v1.1 (ERR-05); Project Context Handoff v2.3 → v2.4 (ERR-06); Local Development Environment Specification v1.0 → v1.1 (ERR-07); Security and Access Control Specification v1.3 → v1.4 and UX and UI Specification v1.4 → v1.5 (ERR-08); Build Sequencing Plan v1.0 → v1.1 (ERR-11). No technical content changed. |
+
+OPEX Budgeting System — Claude Code Implementation Guide — v1.2 Draft Page
+
+Page  of

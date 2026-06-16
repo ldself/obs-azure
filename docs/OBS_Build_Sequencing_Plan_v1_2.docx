@@ -1,0 +1,622 @@
+OPEX Budgeting System  —  Build Sequencing Plan  —  v1.2 Draft**	CONFIDENTIAL | DRAFT**
+
+**OPEX Budgeting System**
+
+**Build Sequencing Plan**
+
+Version 1.2 — Draft · OBS_Build_Sequencing_Plan_v1_2.docx
+
+| **Document title** | **Build Sequencing Plan** |
+| --- | --- |
+| **System** | OPEX Budgeting System (OBS) |
+| **Version** | 1.2 — Draft |
+| **Status** | For Review |
+| **Depends on** | Application Architecture Specification v3.6 · Security and Access Control Specification v1.4 · UX and UI Specification v1.5 · Data Integration Specification v1.6 · Functional Requirements: Budget Planning v1.1 · Functional Requirements: Workforce Planning v1.1 · Functional Requirements: Reporting v1.1 · Functional Requirements: Finance Approval Workflow v1.2 · In-Application Notification Mechanism Specification v1.1 · Project Context Handoff v2.4 |
+
+# 1. Purpose
+
+This document defines the phased build sequence for the OPEX Budgeting System (OBS). It is intended for consumption by Claude Code and the implementation team. Each phase identifies its deliverables, the PostgreSQL tables it creates, the API endpoints it exposes, the acceptance criteria it must satisfy, and its hard prerequisites. No phase may begin until all phases listed as its prerequisites are complete.
+
+All architectural decisions, data models, terminology, and acceptance criteria are drawn from the specifications listed in the Depends-on field above. This document does not introduce new requirements — it sequences the existing ones.
+
+# 2. Sequencing Principles
+
+The following principles govern the sequencing decisions in this document:
+
+- Infrastructure before application — no application code is written until the Azure platform, PostgreSQL Flexible Server, and PostgreSQL schema bootstrap are complete.
+
+- Authentication before data — the Entra ID integration and OBS user registry must be operational before any data-bearing module is built, because every API endpoint enforces authentication.
+
+- Dimensions before transactions — cost center and account hierarchy data must exist in the PostgreSQL obs schema before budget lines, positions, or actuals can reference them.
+
+- Business rules before calculations — compensation burden rates, merit increase rates, and component mappings must be configurable before the calculation service can produce correct results.
+
+- Producing modules before consuming modules — Workforce Planning produces personnel expense budget lines that Budget Planning consumes as read-only derived lines; Workforce Planning must therefore be built before Budget Planning's non-personnel entry layer is wired up for full integration testing.
+
+- Notifications last among core modules — the notification mechanism depends on workflow events from Workforce Planning and the Finance Approval Workflow; those modules must be at least structurally complete before notification wiring is meaningful.
+
+- Reporting last among functional modules — Reporting is a pure read layer over all other modules; it can only be fully tested once the data it reads is being written correctly.
+
+- Each phase is deployable — every phase produces a runnable, tested increment. No phase leaves the system in a broken or partially-initialised state.
+
+# 3. Phase Summary
+
+| **Phase** | **Name** | **Scope Summary** |
+| --- | --- | --- |
+| **Phase 0** | **Infrastructure ****&**** Platform Foundations** | Azure infra, PostgreSQL Flexible Server, Blob Storage, Key Vault, Entra ID app registration, PostgreSQL schema bootstrap, audit log |
+| **Phase 1** | **Authentication, User Registry ****&**** Security Core** | Entra ID OIDC/OAuth 2.0 flow, obs.users, capability flags, cost center grants, API auth middleware, session management |
+| **Phase 2** | **Dimension Data ****&**** Ingestion Pipeline** | Cost center hierarchy, account hierarchy, ingestion pipeline (actuals + employee files), quarantine, re-promotion, Teams + Email alerts |
+| **Phase 3** | **Business Rules Configuration** | Compensation burden rates, merit increase rate, compensation component mappings, overhead allocation rates, fiscal calendar, admin screens |
+| **Phase 4** | **Workforce Planning Module** | Position management, compensation calculations, lifecycle events, transfer workflow, personnel expense derivation, budget line push |
+| **Phase 5** | **Budget Planning Module** | Budget versions, budget lines (non-personnel), overhead allocation, vendor attribution, budget targets, locking, submission workflow |
+| **Phase 6** | **Finance Approval Workflow Module** | Finance review records, approval queue, approve/reject actions, bulk approve, budget version status resolution |
+| **Phase 7** | **In-Application Notification Mechanism** | obs.notifications, notification service API, bell + inbox panel, all eight notification events, deep-link routing |
+| **Phase 8** | **Reporting Module** | Report definitions, report viewer, actuals vs budget, annotations, saved filters, Excel export, report definition authoring UI |
+| **Phase 9** | **Administration Module — Full Surface** | All admin screens not delivered in earlier phases: user management, cost center management, bulk upload, system configuration |
+| **Phase 10** | **End-to-End Hardening ****&**** Acceptance** | Cross-module acceptance criteria verification, performance testing, security review, data seeding, production readiness |
+
+# 4. Phase Detail
+
+## Phase 0 — Infrastructure & Platform Foundations
+
+Prerequisite phases: None. This is the starting point.
+
+### 4.0.1 Objective
+
+Provision all Azure infrastructure and bootstrap the PostgreSQL schema so that every subsequent phase has a stable, secure platform to build on.
+
+### 4.0.2 Deliverables
+
+- Azure resource group, Azure PostgreSQL Flexible Server, Azure Blob Storage account (landing zone + archive + error containers), Azure Key Vault, Azure Static Web Apps instance, and Azure App Service (Linux, Python 3.11 — primary API host).
+
+- Microsoft Entra ID application registration: OIDC/OAuth 2.0 relying party for the OBS SPA; Entra ID managed identities for the App Service and Azure Functions service-to-service authentication.
+
+- PostgreSQL schema bootstrap: all obs.* tables created as empty PostgreSQL tables with correct schemas, B-tree / partial indexes, and retention policies. This includes every table referenced across all specifications, including audit log.
+
+- Azure Key Vault secrets baseline: placeholder secrets for all connection strings and credentials; no static credentials in code or configuration.
+
+- Azure Functions scaffolding: function definitions for the ingestion pipeline (actuals — hourly timer trigger, employees — daily timer trigger, hierarchies — Blob-event trigger) created but with stub logic only.
+
+- CI/CD pipeline skeleton: repository structure, environment configuration, and deployment pipeline scaffolding.
+
+### 4.0.3 PostgreSQL Tables Created
+
+| **Table** | **Source Specification** |
+| --- | --- |
+| **obs.users** | Security and Access Control Specification v1.4 Section 7.3 |
+| **obs.user_cost_center_grants** | Security and Access Control Specification v1.4 Section 7.3 |
+| **obs.user_rollup_grants** | Security and Access Control Specification v1.4 Section 7.3 |
+| **obs.user_rollup_overrides** | Security and Access Control Specification v1.4 Section 7.3 |
+| **obs.audit_log** | Application Architecture Specification v3.6 Section 7 |
+| **obs.cost_center_hierarchy_nodes** | Data Integration Specification v1.6 |
+| **obs.expense_accounts** | Data Integration Specification v1.6 |
+| **obs.account_hierarchy_nodes** | Data Integration Specification v1.6 |
+| **obs.employees** | Data Integration Specification v1.6 |
+| **obs.actuals** | Data Integration Specification v1.6 |
+| **obs.ingestion_control** | Data Integration Specification v1.6 Section 7.2 |
+| **obs.actuals_staging** | Data Integration Specification v1.6 |
+| **obs.employees_staging** | Data Integration Specification v1.6 |
+| **obs.quarantine** | Data Integration Specification v1.6 Section 7.4 |
+| **obs.budget_versions** | Functional Requirements: Budget Planning v1.1 Section 13 |
+| **obs.budget_lines** | Functional Requirements: Budget Planning v1.1 Section 13 |
+| **obs.budget_targets** | Functional Requirements: Budget Planning v1.1 Section 13.1 |
+| **obs.vendor_line_items** | Functional Requirements: Budget Planning v1.1 Section 13.1 |
+| **obs.budget_version_locks** | Functional Requirements: Budget Planning v1.1 Section 13.1 |
+| **obs.overhead_allocation_rates** | Functional Requirements: Budget Planning v1.1 Section 13.1 |
+| **obs.positions** | Functional Requirements: Workforce Planning v1.1 |
+| **obs.position_transfers** | Functional Requirements: Workforce Planning v1.1 |
+| **obs.compensation_component_mappings** | Functional Requirements: Workforce Planning v1.1 Section 3.3 |
+| **obs.compensation_burden_rates** | Functional Requirements: Workforce Planning v1.1 |
+| **obs.merit_increase_rates** | Functional Requirements: Workforce Planning v1.1 |
+| **obs.finance_review_records** | Functional Requirements: Finance Approval Workflow v1.2 Section 4.3 |
+| **obs.notifications** | In-Application Notification Mechanism Specification v1.1 Section 7.1 |
+| **obs.report_definitions** | Functional Requirements: Reporting v1.1 Section 12.1 |
+| **obs.report_annotations** | Functional Requirements: Reporting v1.1 Section 12.1 |
+| **obs.saved_filters** | Functional Requirements: Reporting v1.1 Section 12.1 |
+
+### 4.0.4 Acceptance Criteria
+
+- All obs.* tables exist in the PostgreSQL obs schema with correct schemas and are queryable.
+
+- Azure Blob Storage containers (landing, archive, error) are accessible to the Azure Functions managed identity.
+
+- Azure Key Vault is provisioned and the App Service and Azure Functions managed identities have read access.
+
+- The Entra ID application registration exists with correct redirect URIs for local and production environments.
+
+- CI/CD pipeline deploys a stub FastAPI application to Azure App Service (primary track) returning HTTP 200 on a health endpoint.
+
+- Audit log table is configured append-only via a PostgreSQL BEFORE UPDATE OR DELETE trigger.
+
+## Phase 1 — Authentication, User Registry & Security Core
+
+Prerequisite phases: Phase 0.
+
+### 4.1.1 Objective
+
+Implement the full Entra ID authentication flow, OBS user registry, capability flag model, cost center grant model, and API authorization middleware. Every subsequent phase relies on this security layer.
+
+### 4.1.2 Deliverables
+
+- React SPA: Entra ID OIDC login flow, access token storage in memory, refresh token in httpOnly cookie, silent refresh, logout.
+
+- API middleware: token validation on every request, user registry lookup, Administrator short-circuit, capability flag checks, cost center scope enforcement, confidential data grant enforcement (Steps 1–7 of the request authorization flow per Security Specification Section 9.1).
+
+- User provisioning API: create user registry record, set is_active, set capability flags, assign cost center grants and rollup grants.
+
+- Administration module — User Management screen (UX Specification Section 8.2): invite user, set capability flags, assign cost center grants.
+
+- API error response standards: HTTP 401, 403, 404, 409, 422 per Security Specification Section 9.2.
+
+- Audit log writes for all security events: login, login denial, capability flag changes, grant additions and removals.
+
+- Enforcement of last-active-Administrator guard: system prevents deactivation or flag removal of the last active Administrator.
+
+### 4.1.3 API Endpoints
+
+| **Method + Path** | **Purpose** |
+| --- | --- |
+| **GET /api/v1/me** | Return authenticated user's profile and capability flags |
+| **GET /api/v1/users** | List all OBS users (Administrator only) |
+| **POST /api/v1/users** | Create user registry record (Administrator only) |
+| **PATCH /api/v1/users/{user_id}** | Update capability flags, is_active (Administrator only) |
+| **GET /api/v1/users/{user_id}/grants** | List cost center grants for a user |
+| **POST /api/v1/users/{user_id}/grants** | Add cost center grant (Administrator only) |
+| **DELETE /api/v1/users/{user_id}/grants/{grant_id}** | Remove cost center grant (Administrator only) |
+| **POST /api/v1/users/{user_id}/rollup-grants** | Add rollup grant (Administrator only) |
+| **GET /health** | Health check — unauthenticated, returns HTTP 200 |
+
+### 4.1.4 Acceptance Criteria
+
+- AC-CAP-01 through AC-CAP-11 (Security Specification Section 11.2).
+
+- AC-GRANT-01 through AC-GRANT-08 (Security Specification Section 11.3).
+
+- AC-CONF-01 through AC-CONF-07 (Security Specification Section 11.4).
+
+- AC-AUDIT-01 through AC-AUDIT-07 (Security Specification Section 11.5).
+
+- A user with no active OBS registry record receives HTTP 403 on every authenticated request.
+
+- All API traffic enforces HTTPS/TLS 1.2 minimum; CORS restricts to known frontend origin.
+
+## Phase 2 — Dimension Data & Ingestion Pipeline
+
+Prerequisite phases: Phase 0, Phase 1.
+
+### 4.2.1 Objective
+
+Implement the full Azure Functions ingestion pipeline for all source system file types. Seed the cost center hierarchy and account hierarchy via the initial import. Establish the actuals and employee import schedules. After this phase, the system has live reference data and can receive actuals.
+
+### 4.2.2 Deliverables
+
+- Azure Functions: actuals ingestion pipeline (hourly timer trigger) — file detection, format detection (CSV/Excel, Budget-Accounting sheet), structural and referential integrity validation, quarantine, staging, PostgreSQL INSERT … ON CONFLICT DO UPDATE promotion, ingestion_control record, SHA-256 deduplication.
+
+- Azure Functions: employee ingestion pipeline (daily timer trigger) — same structure, targeting Budget-HR sheet.
+
+- Azure Functions: hierarchy ingestion (Blob-event trigger, ad hoc) — cost center hierarchy and account hierarchy files; initial seed only; re-import blocked post-seed per OI-DI-06 resolution.
+
+- Automatic quarantine re-promotion: background job detects when a missing dimension is resolved and re-promotes affected records without manual trigger (OI-DI-05 resolution).
+
+- Non-USD currency rejection: actuals records with currency != USD are rejected and quarantined as malformed input (OI-DI-03 resolution).
+
+- External pipeline alerts: Microsoft Teams incoming webhook and Email notified for all pipeline alert events (OI-DI-04 resolution).
+
+- Administration module — ingestion monitoring screen: view ingestion runs, quarantine records, error counts; trigger ad hoc hierarchy import.
+
+- Account hierarchy and actuals operate on independent schedules — no required import order; quarantine handles sequencing gaps (OI-DI-07 resolution).
+
+### 4.2.3 Acceptance Criteria
+
+- AC-DI-01 through AC-DI-58 (Data Integration Specification v1.6, all sections).
+
+- Pipeline is fully idempotent: re-ingesting the same file content produces no duplicate records.
+
+- Error rate > 80% causes file-level rejection; valid records in files with error rate ≤ 80% are promoted.
+
+- Quarantine records are automatically re-promoted when the missing dimension is resolved.
+
+- Both Microsoft Teams and Email receive notifications for all pipeline alert events.
+
+## Phase 3 — Business Rules Configuration
+
+Prerequisite phases: Phase 0, Phase 1, Phase 2.
+
+### 4.3.1 Objective
+
+Implement the Administrator-managed business rules configuration layer. Compensation burden rates, merit increase rates, compensation component mappings, and overhead allocation rates must be configurable before the calculation service can produce correct results. This phase also delivers the fiscal calendar.
+
+### 4.3.2 Deliverables
+
+- Compensation burden rate configuration API and administration screen: per-fiscal-year rates including salary cap handling for FICA and unemployment tax components.
+
+- Merit increase rate configuration API and administration screen: global percentage rate per fiscal year, applied to base salary effective 1 March.
+
+- Compensation component to expense account mapping API and administration screen: maps each component code (salary, aipeip_bonus, other_bonus, burden_*) to a personnel expense account in the account hierarchy.
+
+- Overhead allocation rate configuration API and administration screen: per-expense-account, per-geography (or universal) rates per fiscal year; activate/deactivate actions.
+
+- Fiscal calendar read API: period definitions for the active fiscal year.
+
+- All configuration changes trigger audit log events and, where applicable, downstream recalculation (mapping changes trigger recalculation for all open fiscal years).
+
+### 4.3.3 API Endpoints
+
+| **Method + Path** | **Purpose** |
+| --- | --- |
+| **GET /api/v1/fiscal-calendar** | Return period definitions for a fiscal year |
+| **GET /api/v1/merit-increase-rates** | List merit increase rates by fiscal year |
+| **PUT /api/v1/merit-increase-rates** | Set merit increase rate for a fiscal year (Administrator only) |
+| **GET /api/v1/compensation-burden-rates** | List burden rates by fiscal year |
+| **PUT /api/v1/compensation-burden-rates** | Set burden rates for a fiscal year (Administrator only) |
+| **GET /api/v1/compensation-component-mappings** | List component-to-account mappings |
+| **PUT /api/v1/compensation-component-mappings** | Set all component mappings (Administrator only) |
+| **GET /api/v1/overhead-allocation-rates** | List overhead rates for a fiscal year |
+| **POST /api/v1/overhead-allocation-rates** | Add overhead rate (Administrator only) |
+| **PATCH /api/v1/overhead-allocation-rates/{id}** | Edit overhead rate (Administrator only) |
+| **DELETE /api/v1/overhead-allocation-rates/{id}** | Deactivate overhead rate (Administrator only) |
+
+### 4.3.4 Acceptance Criteria
+
+- AC-WP-CFG-01 through AC-WP-CFG-* (Workforce Planning Specification Section 12.1).
+
+- Non-Administrator write attempts to any business rules endpoint return HTTP 403.
+
+- Changing a compensation component mapping triggers a COMPENSATION_MAPPING_UPDATED audit event.
+
+- Changing overhead allocation rates triggers recalculation for the affected fiscal year (recalculation service is a stub at this phase — full wiring occurs in Phase 5).
+
+## Phase 4 — Workforce Planning Module
+
+Prerequisite phases: Phase 0, Phase 1, Phase 2, Phase 3.
+
+### 4.4.1 Objective
+
+Implement the full Workforce Planning module: position management, compensation calculations, all lifecycle events, the transfer workflow, and the personnel expense derivation direct push mechanism. After this phase, personnel expense budget lines in obs.budget_lines are populated and kept current by the calculation service.
+
+### 4.4.2 Deliverables
+
+- Headcount grid UI (UX Specification Section 6): filled and open positions, compensation display (confidential data grant enforced), all lifecycle action buttons.
+
+- Position management: create open position, view filled positions (populated by daily HR import), edit compensation fields.
+
+- Calculation service: salary expense proration by days active, merit increase application (1 March effective), salary adjustment, AIPEIP bonus (proration for retirements, zero for terminations), other bonus, compensation burden rate application including salary cap handling.
+
+- Employee lifecycle events: salary adjustment, termination (zero budget lines from effective date), retirement (AIPEIP prorated through retirement month).
+
+- Transfer workflow: initiation, designated approver notification (stub — wired to notifications in Phase 7), approval, rejection, 3-day expiry background job.
+
+- Personnel expense direct push: every position save synchronously writes all affected obs.budget_lines with is_calculated = TRUE and source = 'workforce_planning' for all 12 periods.
+
+- Headcount derivation: budgeted headcount written to cost center record for overhead allocation input.
+
+- Dry-run / what-if API endpoints for the calculation service.
+
+- All Workforce Planning audit events (POSITION_CREATED, SALARY_ADJUSTMENT_RECORDED, POSITION_TERMINATED, POSITION_RETIRED, TRANSFER_* events, MERIT_RATE_UPDATED, BURDEN_RATES_UPDATED, COMPENSATION_MAPPING_UPDATED, WORKFORCE_PLAN_SAVED).
+
+### 4.4.3 API Endpoints
+
+| **Method + Path** | **Purpose** |
+| --- | --- |
+| **GET /api/v1/positions** | List positions for a cost center + fiscal year (confidential grant enforced) |
+| **POST /api/v1/positions** | Create open position (ALL_WRITE confidential grant or Administrator) |
+| **PATCH /api/v1/positions/{id}** | Update compensation fields (ALL_WRITE confidential grant or Administrator) |
+| **POST /api/v1/positions/{id}/terminate** | Record termination with effective date |
+| **POST /api/v1/positions/{id}/retire** | Record retirement with effective date |
+| **POST /api/v1/positions/{id}/salary-adjustment** | Record salary adjustment |
+| **POST /api/v1/transfers** | Initiate position transfer to receiving cost center |
+| **POST /api/v1/transfers/{id}/approve** | Approve transfer (designated approver only) |
+| **POST /api/v1/transfers/{id}/reject** | Reject transfer (designated approver only) |
+| **GET /api/v1/positions/{id}/what-if** | Dry-run calculation without saving |
+
+### 4.4.4 Acceptance Criteria
+
+- AC-WP-CFG-01 through all AC-WP-* criteria (Workforce Planning Specification v1.0 Section 12).
+
+- Personnel expense budget lines in obs.budget_lines are written synchronously on every position save — verified by querying obs.budget_lines immediately after the API response.
+
+- January and February use base salary only; March through December use new annual salary (base + merit + salary adjustment).
+
+- Terminated position: all budget lines from effective date through December are zeroed. AIPEIP bonus zeroed for entire year.
+
+- Retired position: AIPEIP bonus prorated through retirement month per specification rules.
+
+- Transfer approval triggers full recalculation and direct push for both sending and receiving cost centers.
+
+- Transfer expiry background job runs hourly and sets expired status + notifies initiating user (notification stub acceptable until Phase 7).
+
+## Phase 5 — Budget Planning Module
+
+Prerequisite phases: Phase 0, Phase 1, Phase 2, Phase 3, Phase 4.
+
+### 4.5.1 Objective
+
+Implement the full Budget Planning module: budget version management, non-personnel budget line entry, overhead allocation, vendor attribution, budget targets, entry locking, the three-step budget entry workflow, and budget submission.
+
+### 4.5.2 Deliverables
+
+- Budget entry grid (UX Specification Sections 5.2–5.6): non-personnel expense line entry, actuals display, target variance display, commentary, personnel expense rows (read-only derived from Phase 4), overhead allocation rows (read-only calculated).
+
+- Budget version management: create (clone), rename, set as active, archive, permanent delete; budget version selector.
+
+- Overhead allocation calculation: headcount × rate per account and geography; recalculates on headcount or rate change.
+
+- Vendor attribution: vendor side panel, per-period vendor line items for designated expense accounts.
+
+- Budget target management: per cost center / account / period / version; inline editing; bulk CSV/Excel upload; Vs. Target variance display; amber highlighting for abs(variance_pct) > 10.
+
+- Budget entry locking: Administrator-only lock/unlock per cost center + fiscal year + version; locked state returns HTTP 403 on write attempts for non-Administrator callers.
+
+- Budget entry workflow: BudgetWorkflowContext, three-step guided process (Personnel Expenses → Non-Personnel Expenses → Review and Submit); step eligibility rules.
+
+- Budget Summary screen (UX Specification Section 5.8): aggregated view, mandatory commentary check, Submit button.
+
+- Budget submission: commentary validation server-side, status transition to Submitted, BUDGET_SUBMITTED audit event, Finance Review record creation (trigger for Phase 6).
+
+- Cost center hierarchy maintenance: add cost center, rename, move (reassign parent), deactivate/reactivate, bulk upload.
+
+- All Budget Planning audit events.
+
+### 4.5.3 Acceptance Criteria
+
+- AC-BP-VER-01 through AC-BP-VER-09 (Budget Planning Specification v1.1 Section 15.2).
+
+- AC-BP-TGT-01 through AC-BP-TGT-08 (Budget Planning Specification v1.1 Section 15.3).
+
+- AC-BP-VA-01 through AC-BP-VA-04 (Budget Planning Specification v1.1 Section 15.4).
+
+- AC-LOCK-01 through AC-LOCK-* (Security Specification v1.4 Section 11.6).
+
+- Personnel expense budget lines are read-only in the budget entry grid — no write path exists in the UI or API for is_calculated = TRUE lines.
+
+- Budget submission fails server-side if any account row requiring commentary has a null or empty commentary field.
+
+- Permanent version deletion removes obs.budget_versions, all obs.budget_lines, obs.budget_targets, and obs.vendor_line_items in a single transaction.
+
+## Phase 6 — Finance Approval Workflow Module
+
+Prerequisite phases: Phase 0, Phase 1, Phase 4, Phase 5.
+
+### 4.6.1 Objective
+
+Implement the Finance Approval Workflow: the Approval Queue screen, the Review Detail screen, approve and reject actions, bulk approve, and the budget version status resolution logic.
+
+### 4.6.2 Deliverables
+
+- Finance Review record creation: obs.finance_review_records created synchronously when a cost center budget version is submitted (triggered by Phase 5 submission).
+
+- Approval Queue screen (UX Specification Section 9): list of pending finance review records scoped to the Finance Reviewer's assigned cost centers; status chips; bulk approve.
+
+- Review Detail screen (UX Specification Section 9): read-only budget grid (budget_summary payload), confidential data enforcement, approve and reject actions with confirmation modals.
+
+- resolve_budget_version_status() server-side helper: called after every approve or reject; transitions obs.budget_versions.status to Approved or Rejected when all cost center submissions for the version have resolved.
+
+- Bulk approve: POST /api/v1/finance-review/bulk-approve; approves all pending reviews for a version within the Finance Reviewer's scope in a single transaction.
+
+- All Finance Approval Workflow audit events: BUDGET_SUBMITTED, BUDGET_APPROVED, BUDGET_REJECTED, BUDGET_VERSION_APPROVED, BUDGET_VERSION_REJECTED, FINANCE_REVIEWER_FLAG_SET.
+
+### 4.6.3 API Endpoints
+
+| **Method + Path** | **Purpose** |
+| --- | --- |
+| **GET /api/v1/finance-review** | Approval Queue — list review records in caller's scope |
+| **GET /api/v1/finance-review/{review_id}** | Review Detail — includes budget_summary payload |
+| **POST /api/v1/finance-review/{review_id}/approve** | Approve a single cost center submission |
+| **POST /api/v1/finance-review/{review_id}/reject** | Reject a single cost center submission |
+| **POST /api/v1/finance-review/bulk-approve** | Approve all pending submissions for a version |
+
+### 4.6.4 Acceptance Criteria
+
+- All AC-FAW-* criteria (Functional Requirements: Finance Approval Workflow v1.2, all sections).
+
+- AC-CONF-07: Finance Reviewer with ALL_NONE confidential grant receives no compensation fields in the budget_summary payload.
+
+- resolve_budget_version_status() transitions version to Approved only when all cost center review records are Approved; transitions to Rejected when any record is Rejected and all others are resolved.
+
+- Bulk approve operates atomically — either all targeted reviews are approved or none are.
+
+## Phase 7 — In-Application Notification Mechanism
+
+Prerequisite phases: Phase 0, Phase 1, Phase 4, Phase 6.
+
+### 4.7.1 Objective
+
+Implement the full in-application notification mechanism: the obs.notifications table write model, the notification service API, the notification bell and inbox panel in the application shell, all eight notification events, and deep-link routing.
+
+### 4.7.2 Deliverables
+
+- obs.notifications write model: notification records created server-side synchronously within the same API transaction as the triggering event; failures are non-fatal and do not roll back the triggering event.
+
+- Notification service module (src/services/notification_service.py): create_notification(), create_notifications_bulk(); wrapped in try/except with WARNING log on failure.
+
+- Notification service API: GET /api/v1/notifications (paginated, user-scoped, unread_only filter, expiry exclusion), POST /api/v1/notifications/{id}/mark-read, POST /api/v1/notifications/mark-all-read.
+
+- Application shell: notification bell with unread count badge (UX Specification Section 3.1 and Notification Mechanism Specification v1.1), notification inbox panel with mark-read and deep-link navigation.
+
+- All eight notification events wired: TRANSFER_INITIATED (to designated transfer approver), TRANSFER_REJECTED (to initiating user), TRANSFER_EXPIRED (to initiating user), BUDGET_SUBMITTED (to Finance Reviewers in scope), BUDGET_APPROVED (to submitting cost center owner), BUDGET_REJECTED (to submitting cost center owner), BUDGET_VERSION_APPROVED (to submitting cost center owners for all cost centers in version), BUDGET_VERSION_REJECTED (same scope).
+
+- Notification expiry: TRANSFER_INITIATED notifications expire when the transfer leaves pending status.
+
+- NOTIFICATION_READ audit event written on mark-read (single and bulk).
+
+- Replace transfer workflow notification stubs from Phase 4 with live notification wiring.
+
+### 4.7.3 Acceptance Criteria
+
+- All AC-NOTIF-* criteria (In-Application Notification Mechanism Specification v1.1, all sections).
+
+- Notification creation failure does not roll back the triggering event (verified by simulating a notification write failure).
+
+- GET /api/v1/notifications returns only notifications belonging to the authenticated user — cross-user access returns HTTP 403.
+
+- Unread count badge updates within one polling interval of a new notification being created.
+
+- Each notification deep-link navigates to the correct screen within OBS.
+
+## Phase 8 — Reporting Module
+
+Prerequisite phases: Phase 0, Phase 1, Phase 2, Phase 4, Phase 5.
+
+### 4.8.1 Objective
+
+Implement the full Reporting module: the report viewer, actuals vs. budget comparison, annotations, saved filters, Excel export, and the report definition authoring surface.
+
+### 4.8.2 Deliverables
+
+- Report List screen (UX Specification Section 7.2): published reports for standard users; Draft badge and Manage Reports button for Report Developers and Administrators.
+
+- Report viewer (UX Specification Section 7.3): data grid, cost center selector, fiscal year selector, budget version selector, actuals vs. budget comparison mode, column visibility panel, rollup aggregation, confidential data enforcement.
+
+- Report Definition Authoring surface (UX Specification Section 7.6 — resolves OI-RPT-01): Report Definition Management screen, Report Definition Editor with two-panel column selection (ColumnConfigurator.tsx using @hello-pangea/dnd), Default Visible toggles, Save/Publish/Unpublish/Delete flows, unsaved change warning, Draft vs Published state.
+
+- Variance annotations: per-row annotations persisted to obs.report_annotations; create, edit, delete; visible to all users with cost center read access.
+
+- Saved filters: personal named filter sets persisted to obs.saved_filters; unlimited per user; apply, rename, delete.
+
+- Excel export: server-side generation via openpyxl; confidential data grant enforcement; file name pattern per specification; signed URL or binary response; REPORT_EXPORTED audit event.
+
+- All Reporting audit events.
+
+### 4.8.3 API Endpoints
+
+| **Method + Path** | **Purpose** |
+| --- | --- |
+| **GET /api/v1/report-definitions** | List report definitions (published only for standard users; all for Report Developer/Admin) |
+| **POST /api/v1/report-definitions** | Create draft report definition (Report Developer or Administrator) |
+| **PATCH /api/v1/report-definitions/{id}** | Update report definition |
+| **POST /api/v1/report-definitions/{id}/publish** | Publish report definition |
+| **POST /api/v1/report-definitions/{id}/unpublish** | Unpublish report definition |
+| **DELETE /api/v1/report-definitions/{id}** | Delete report definition |
+| **GET /api/v1/reports/{id}/data** | Return report data for viewer (cost center scoped) |
+| **POST /api/v1/reports/export** | Generate Excel export; return signed URL or binary |
+| **POST /api/v1/report-annotations** | Create annotation |
+| **PATCH /api/v1/report-annotations/{id}** | Update annotation |
+| **DELETE /api/v1/report-annotations/{id}** | Delete annotation |
+| **GET /api/v1/saved-filters** | List saved filters for authenticated user |
+| **POST /api/v1/saved-filters** | Create saved filter |
+| **PATCH /api/v1/saved-filters/{id}** | Update saved filter |
+| **DELETE /api/v1/saved-filters/{id}** | Delete saved filter |
+
+### 4.8.4 Acceptance Criteria
+
+- AC-UP-RPT-AUTH-01 through AC-UP-RPT-AUTH-18 (UX and UI Specification v1.5 Section 7.6).
+
+- All AC-RPT-* criteria (Functional Requirements: Reporting v1.1, all sections).
+
+- Compensation columns are absent (not null) from report data payloads for cost centers where the requesting user holds ALL_NONE confidential grant.
+
+- Excel export completes within 10 seconds for a single cost center (performance target per Reporting FR Section 11.2).
+
+- Duplicate report definition name returns HTTP 409.
+
+- Publish is only available when report is in Draft status and the form is in a saved (clean) state.
+
+## Phase 9 — Administration Module — Full Surface
+
+Prerequisite phases: Phase 0, Phase 1, Phase 2, Phase 3, Phase 4, Phase 5.
+
+### 4.9.1 Objective
+
+Complete any Administration module screens not already delivered in earlier phases. Ensure the full Administration module surface is consistent, tested, and complete.
+
+### 4.9.2 Deliverables
+
+- Confirm and close out all Administration module screens delivered in earlier phases: User Management (Phase 1), ingestion monitoring (Phase 2), business rules configuration screens (Phase 3), compensation component mapping (Phase 3), overhead allocation rates (Phase 3), budget version management (Phase 5), budget target management (Phase 5), cost center management (Phase 5).
+
+- Any remaining Administration module screens identified during integration that were not formally closed in earlier phases.
+
+- Administration module navigation consistency review against UX Specification Section 8.
+
+- End-to-end Administration module smoke test: an Administrator can provision a new user, assign grants, configure business rules, manage cost centers, manage budget versions, and monitor ingestion — all from the Administration module without console access.
+
+### 4.9.3 Acceptance Criteria
+
+- All Administration module acceptance criteria from UX Specification Section 8.
+
+- No Administration function requires direct PostgreSQL or database access — all operations go through the API.
+
+- Every Administration action generates the correct audit event.
+
+## Phase 10 — End-to-End Hardening & Acceptance
+
+Prerequisite phases: All preceding phases.
+
+### 4.10.1 Objective
+
+Verify all acceptance criteria across all specifications, conduct performance and security testing, seed production reference data, and confirm the system is ready for live use.
+
+### 4.10.2 Deliverables
+
+- Full acceptance criteria run: all AC-* identifiers across all ten specifications verified by automated test or documented manual test procedure.
+
+- Cross-module integration scenarios: full budget cycle (dimension seed → employee import → actuals import → open position creation → compensation calculation → budget entry → submission → Finance review → approval) executed end-to-end.
+
+- Performance testing: Excel export within 10-second target; report data endpoint response times under load; ingestion pipeline throughput.
+
+- Security review: CORS configuration, token storage, CSRF protection, audit log append-only enforcement, confidential data enforcement across all modules.
+
+- Production data seeding: initial cost center hierarchy import, account hierarchy import, business rules configuration, fiscal calendar, at least one Administrator user provisioned.
+
+- App Service deployment validation: confirm the API codebase deploys to Azure App Service (Linux, Python 3.11) and starts cleanly under production configuration — infrastructure configuration only.
+
+- Final documentation: any architectural decision records raised during implementation captured.
+
+### 4.10.3 Acceptance Criteria
+
+- Every AC-* criterion listed across all specifications passes in the production-equivalent environment.
+
+- No hardcoded credentials exist in any code, configuration file, or CI/CD pipeline definition.
+
+- The audit log table rejects UPDATE and DELETE operations from any caller including the API service identity (append-only enforcement verified).
+
+- The last active Administrator cannot be deactivated or have is_administrator set to FALSE.
+
+- System is operational: at least one active Administrator, one active fiscal year, one cost center hierarchy node, and one account hierarchy node exist in the production PostgreSQL database.
+
+# 5. Cross-Cutting Implementation Notes
+
+The following notes apply across all phases and must be observed by Claude Code throughout the implementation.
+
+### 5.1 Hosting-Agnostic API
+
+The API codebase must contain no host-specific dependencies in core logic. Infrastructure configuration (environment variables, connection strings, identity bindings) is the only environment-specific layer for Azure App Service. This must be verified at Phase 10.
+
+### 5.2 Business Rules as Configuration Data
+
+Compensation burden rates, merit increase rates, component mappings, and overhead allocation rates are stored as data in the PostgreSQL obs schema — not hardcoded. No rate or mapping value may appear as a literal in application code.
+
+### 5.3 Calculation Service Ownership
+
+All calculation results originate from the server-side calculation service. The frontend may display optimistic local estimates for simple arithmetic while a server response is in flight, but must always reconcile to the server result. The frontend never owns authoritative business rule logic.
+
+### 5.4 Idempotency
+
+All ingestion jobs must be fully idempotent. All API endpoints that perform upserts must use PostgreSQL INSERT … ON CONFLICT DO UPDATE. Running the same operation twice must produce the same result — no duplicates, no errors.
+
+### 5.5 Notification Non-Fatality
+
+Notification creation is non-fatal. A failure in the notification service module must not roll back the triggering event. All notification writes are wrapped in try/except with a WARNING log on failure.
+
+### 5.6 No Write-Back to Source Systems
+
+OBS is an integration consumer only. Under no circumstance does any code path write to the accounting system or HR admin system. All integration is inbound file-based.
+
+### 5.7 Account Hierarchy Read-Only
+
+obs.expense_accounts and obs.account_hierarchy_nodes have no UPDATE or DELETE API endpoints. The ingestion pipeline is the only write path via the Azure Functions managed identity. Any user-facing write attempt returns HTTP 405.
+
+### 5.8 Terminology
+
+All code identifiers, API contracts, database column names, UI labels, and documentation must use the exact terms from the System Context and Domain Glossary v1.11. No synonyms or assumed meanings are permitted.
+
+# 6. Document Control
+
+| **Version** | **Status** | **Date** | **Change Summary** |
+| --- | --- | --- | --- |
+| **1.0** | Draft | TBD | Initial version. Derived from all OBS specifications at their current versions. Defines ten build phases with deliverables, API endpoints, Delta Lake tables created, and acceptance criteria references for each phase. |
+| **1.1** | Draft | Claude | Databricks-free platform cascade aligned to Architecture Spec v3.6. Phase 0 changed from a Databricks workspace + Delta Lake schema bootstrap to an Azure PostgreSQL Flexible Server + PostgreSQL schema bootstrap (B-tree / partial indexes replacing Z-ORDER); §4.0.3 heading changed from "Delta Lake Tables Created" to "PostgreSQL Tables Created"; audit-log append-only restated as a PostgreSQL BEFORE UPDATE OR DELETE trigger; stub API now deploys to Azure App Service (primary). App Service provisioned as the single primary API host (fallback / idle track removed). Phase 2 ingestion changed from three Databricks Workflows to three Azure Functions (timer and Blob-event triggers); promotion changed from Delta Lake MERGE to PostgreSQL INSERT … ON CONFLICT DO UPDATE. Phase 10 dual-track hosting validation replaced by single App Service deployment validation. §5 cross-cutting notes updated (hosting-agnostic, business-rules storage, idempotency, ingestion identity). Depends-on updated to Architecture v3.6, Security v1.4, UX/UI v1.5, Data Integration v1.6. |
+| **1.2** | Draft | Claude | Version-reference corrections per Specification Consistency & Errata Report v1.0. §4.0.3 PostgreSQL Tables Created source-spec column updated: Security and Access Control Specification v1.3 → v1.4 (ERR-08) and Data Integration Specification v1.5 → v1.6 (ERR-04); Functional Requirements: Workforce Planning v1.0 → v1.1 (ERR-03); In-Application Notification Mechanism Specification v1.0 → v1.1 (ERR-05). Depends-on, §5.8 terminology reference (Glossary v1.9 → v1.11, ERR-02), Project Context Handoff v2.3 → v2.4 (ERR-06), and acceptance-criteria cross-references (§4.2.3 AC-DI, §4.5.3 AC-LOCK, §4.7.2 notification) updated to current versions. No sequencing or requirements content changed. |
+
+OPEX Budgeting System — Build Sequencing Plan — v1.2 Draft
+
+Page  of

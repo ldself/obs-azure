@@ -1,0 +1,682 @@
+OPEX Budgeting System  —  Azure Cloud Migration Specification  (v2.0)**	CONFIDENTIAL | DRAFT**
+
+**OPEX Budgeting System**
+
+**Azure Cloud Migration Specification**
+
+*PostgreSQL Flexible Server + Azure App Service + Azure Functions*
+
+*Version 2.0 — Canonical Baseline*
+
+*OBS_Azure_Cloud_Migration_Specification_v2_0.docx*
+
+| **Document title** | **Azure Cloud Migration Specification** |
+| --- | --- |
+| System | OPEX Budgeting System (OBS) |
+| Version | 2.0 — Canonical Baseline |
+| Status | For Review |
+| Audience | Development Team, Technical Leads, DevOps |
+| Depends on | OBS Application Architecture Specification v3.6; OBS Local Dev Environment Spec v1.1; OBS Build Sequencing Plan v1.1; OBS Security and Access Control Specification v1.4; OBS Data Integration Specification v1.6; OBS Claude Code Implementation Guide v1.1 |
+
+# 1. Purpose and Scope
+
+This specification defines all steps required to migrate the OPEX Budgeting System (OBS) from its local desktop development state to the Azure cloud environment using PostgreSQL Flexible Server as the data platform, Azure App Service as the primary API host, and Azure Functions as the batch ingestion pipeline executor. It is the canonical Azure cloud migration specification for OBS and implements the platform baseline established in Application Architecture Specification v3.6.
+
+This document is structured to be consumed directly by Claude Code and the development team. Every step is a discrete, verifiable task with explicit acceptance criteria. Steps are sequenced in strict dependency order.
+
+## 1.1 Architectural Decision Record
+
+This specification constitutes the architectural decision record for the following decisions that implement the OBS Application Architecture Specification v3.6 baseline:
+
+| **ADR** | **Architecture Spec v3.6 Baseline** | **This Specification Implementation** |
+| --- | --- | --- |
+| ADR-PG-01 | Data platform: Azure PostgreSQL Flexible Server (Section 4.2) | Data platform: Azure PostgreSQL Flexible Server. All obs.* tables are PostgreSQL tables in the obs schema. The obs schema is the single source of truth. |
+| ADR-PG-02 | Primary API host: Azure App Service, Linux, Python 3.11 (Section 2.2) | Primary API host: Azure App Service (Linux, Python 3.11), provisioned as the single API hosting track. |
+| ADR-PG-03 | Batch processing: Azure Functions (Section 4.2) | Batch processing: Azure Functions (timer-triggered for actuals and employees; Blob Storage event-triggered for hierarchies). |
+| ADR-PG-04 | DB_ENGINE environment variable: duckdb / postgresql | DB_ENGINE environment variable: duckdb / postgresql. The postgresql branch in engine.py is the cloud target; the duckdb branch remains the local development engine. |
+
+| **Claude Code note — hosting-agnostic design honoured** | ***The codebase was intentionally designed to be hosting-agnostic. The DB_ENGINE switch in engine.py and the environment-variable-driven configuration layer mean this migration is an infrastructure provisioning and targeted code extension exercise — not a rewrite. Only engine.py, helpers.py, the pipeline scripts, and requirements.txt require changes.*** |
+| --- | --- |
+
+## 1.2 Migration Stage Overview
+
+| **Stage** | **Name** | **Summary** |
+| --- | --- | --- |
+| 1 | Azure Infrastructure Provisioning | Resource group, PostgreSQL Flexible Server, Azure Blob Storage, Key Vault, App Service Plan + Web App, Static Web Apps, Application Insights. |
+| 2 | Identity and Access Configuration | Entra ID application registration; App Service managed identity; RBAC grants to PostgreSQL, Blob Storage, and Key Vault. |
+| 3 | PostgreSQL Schema Bootstrap | Create the obs schema and all obs.* tables using PostgreSQL DDL; configure audit log trigger for append-only enforcement; seed the first Administrator user. |
+| 4 | Code Changes — PostgreSQL Engine Branch | Add DB_ENGINE=postgresql branch to engine.py and helpers.py; add psycopg2 to requirements.txt; audit the merge() helper. |
+| 5 | Application Deployment and Configuration | Deploy FastAPI to App Service; deploy React SPA to Static Web Apps; configure all environment variables and Key Vault references; activate Entra ID OIDC flow. |
+| 6 | Azure Functions Ingestion Pipeline | Deploy three Azure Functions (actuals timer, employees timer, hierarchies blob trigger); configure Blob Storage bindings; verify idempotency. |
+| 7 | End-to-End Validation | Full budget cycle validation across all OBS modules. |
+
+# 2. Prerequisites
+
+All items below must be confirmed before Stage 1 begins. An unresolved prerequisite blocks all downstream stages.
+
+## 2.1 Access and Permissions
+
+| **Prerequisite** | **Required Access Level** |
+| --- | --- |
+| Azure subscription | Contributor or Owner on the target subscription |
+| Microsoft Entra ID tenant | Application Administrator or Global Administrator role |
+| CI/CD pipeline | Write access to the repository and pipeline secret store |
+| DNS / custom domain (optional) | DNS management access if a custom domain is required |
+
+## 2.2 Local Environment Verified
+
+The Phase 0 Prerequisite Gate from OBS Local Dev Environment Spec v1.0 must be passed before cloud migration begins:
+
+- make db-bootstrap and make db-seed complete without errors against the local DuckDB instance.
+
+- make api starts FastAPI and GET /health returns HTTP 200.
+
+- npm run dev starts the Vite frontend and the browser at http://localhost:5173 loads the application shell.
+
+- make test-unit passes with zero failures.
+
+## 2.3 Codebase Readiness Checks
+
+| **Check** | **Verification Method** |
+| --- | --- |
+| LOCAL_AUTH_BYPASS startup assertion is present | Review backend/app/auth/middleware.py — startup code must raise if LOCAL_AUTH_BYPASS=true and host is not localhost. |
+| DB_ENGINE switch is implemented in engine.py | Confirm engine.py branches on DB_ENGINE. The postgresql branch is added in Stage 4 alongside the existing duckdb branch. |
+| No hardcoded credentials in any file | Run: grep -r 'password\│secret\│token\│key' backend/ --include='*.py' │ grep -v '.env\│Key Vault\│test' |
+| CORS_ALLOWED_ORIGINS is environment-variable-driven | Review backend/app/main.py CORS middleware — origin must come from settings, not hardcoded. |
+| ALERT_CHANNEL is environment-variable-driven | Pipeline alert channel must be controlled by the ALERT_CHANNEL environment variable. |
+| Frontend values use import.meta.env | Review frontend/src — VITE_API_BASE_URL and VITE_AUTH_ENABLED must be read from Vite env, not hardcoded. |
+
+# 3. Stage 1 — Azure Infrastructure Provisioning
+
+Provision all Azure resources. All resources must be created within the same Azure region to minimise latency and data transfer costs.
+
+## 3.1 Resource Group
+
+| **az group create \   --name obs-prod-rg \   --location ****<****azure-region****>** |
+| --- |
+
+Acceptance criteria: Resource group exists. All subsequent resources in this stage are deployed into it.
+
+## 3.2 Azure PostgreSQL Flexible Server
+
+PostgreSQL Flexible Server is the data platform. It serves as the single source of truth for all OBS data. Configure High Availability mode to meet the 99.5% monthly uptime SLA required by Architecture Spec v3.6 Section 4.4.
+
+| **az postgres flexible-server create \   --name obs-prod-pg \   --resource-group obs-prod-rg \   --location ****<****azure-region****>**** \   --admin-user obsadmin \   --admin-password ****<****strong-password-stored-in-keyvault****>**** \   --sku-name Standard_D2s_v3 \   --tier GeneralPurpose \   --storage-size 128 \   --version 16 \   --high-availability ZoneRedundant \   --backup-retention 30 \   --geo-redundant-backup Enabled** |
+| --- |
+
+After creation, create the OBS application database and the obs schema:
+
+| **# Connect to the server (use Azure Cloud Shell or psql with SSL) psql ****"****host=obs-prod-pg.postgres.database.azure.com \       port=5432 dbname=postgres \       user=obsadmin sslmode=require****"**** -- Create the application database CREATE DATABASE obs_db; -- Connect to obs_db and create the obs schema \c obs_db CREATE SCHEMA obs;** |
+| --- |
+
+Store the connection string in Key Vault:
+
+| **az keyvault secret set \   --vault-name obs-prod-kv \   --name obs-pg-connection-string \   --value ****"****host=obs-prod-pg.postgres.database.azure.com port=5432 dbname=obs_db \            user=obsadmin password=****<****password****>**** sslmode=require****"** |
+| --- |
+
+Acceptance criteria:
+
+- PostgreSQL Flexible Server is provisioned with Zone-Redundant HA.
+
+- obs_db database and obs schema exist.
+
+- Connection string is stored in Key Vault as obs-pg-connection-string.
+
+- The admin password is not stored in any file or CI/CD pipeline definition — Key Vault only.
+
+- SSL is required for all connections (sslmode=require enforced).
+
+| **Claude Code note — PostgreSQL vs DuckDB type compatibility** | ***PostgreSQL and DuckDB share nearly identical SQL syntax for the obs.***** schemas. Key differences to handle in the PostgreSQL DDL: (1) Use TEXT instead of STRING for all string columns. (2) Use NUMERIC(15,2) instead of DECIMAL(15,2) for monetary amounts — both are valid in PostgreSQL but NUMERIC is conventional. (3) Use NUMERIC(6,4) for percentage rates. (4) Use UUID type for primary keys — PostgreSQL has a native UUID type unlike DuckDB. (5) Use TIMESTAMPTZ (timestamp with time zone) instead of TIMESTAMP, storing all values in UTC. (6) The obs.audit_log append-only constraint is enforced via a PostgreSQL trigger (see Stage 3) rather than a storage-layer property.*** |
+| --- | --- |
+
+## 3.3 Azure Blob Storage Account
+
+Create the storage account for the file landing zone. Blob Storage is the integration landing zone for all source-system files. Configure Zone-Redundant Storage (ZRS) per Architecture Spec v3.6 Section 4.4.
+
+| **az storage account create \   --name obsprodlanding \   --resource-group obs-prod-rg \   --sku Standard_ZRS \   --kind StorageV2 # Create required containers az storage container create --name landing-actuals      --account-name obsprodlanding az storage container create --name landing-employees    --account-name obsprodlanding az storage container create --name landing-hierarchies  --account-name obsprodlanding az storage container create --name archive              --account-name obsprodlanding az storage container create --name error                --account-name obsprodlanding** |
+| --- |
+
+Store the storage connection string in Key Vault:
+
+| **az keyvault secret set \   --vault-name obs-prod-kv \   --name obs-blob-storage-connection-string \   --value ****"****$(az storage account show-connection-string \     --name obsprodlanding --resource-group obs-prod-rg --query connectionString -o tsv)****"** |
+| --- |
+
+Acceptance criteria:
+
+- Storage account is ZRS-replicated.
+
+- All five containers exist: landing-actuals, landing-employees, landing-hierarchies, archive, error.
+
+- All containers are private — no anonymous access.
+
+- Connection string is stored in Key Vault as obs-blob-storage-connection-string.
+
+## 3.4 Azure Key Vault
+
+| **az keyvault create \   --name obs-prod-kv \   --resource-group obs-prod-rg \   --enable-soft-delete true \   --retention-days 90** |
+| --- |
+
+Required secrets to be populated across all stages:
+
+| **Secret Name** | **Purpose** |
+| --- | --- |
+| obs-pg-connection-string | PostgreSQL Flexible Server connection string (see Section 3.2) |
+| obs-blob-storage-connection-string | Blob Storage account connection string (see Section 3.3) |
+| obs-entra-tenant-id | Microsoft Entra ID tenant ID for OIDC authentication |
+| obs-entra-client-id | OBS application client ID registered in Entra ID |
+| obs-cors-allowed-origins | Comma-separated list of allowed frontend origins |
+| obs-appinsights-connection-string | Application Insights connection string (see Section 3.6) |
+
+## 3.5 Azure App Service
+
+Create the App Service Plan and Web App that will host the FastAPI backend. App Service (Linux, Python 3.11) is the single API hosting track established in Architecture Spec v3.6 Section 2.2.
+
+| **az appservice plan create \   --name obs-prod-asp \   --resource-group obs-prod-rg \   --sku P2v3 \   --is-linux \   --number-of-workers 2 az webapp create \   --name obs-prod-api \   --resource-group obs-prod-rg \   --plan obs-prod-asp \   --runtime PYTHON:3.11** |
+| --- |
+
+Enable the system-assigned managed identity on the Web App — this is used for Key Vault access:
+
+| **az webapp identity assign \   --name obs-prod-api \   --resource-group obs-prod-rg** |
+| --- |
+
+Note the principal ID returned — it is used in Stage 2 to grant Key Vault access.
+
+Configure the startup command so App Service uses Gunicorn with Uvicorn workers:
+
+| **az webapp config set \   --name obs-prod-api \   --resource-group obs-prod-rg \   --startup-file ****"****gunicorn -w 4 -k uvicorn.workers.UvicornWorker backend.app.main:app****"** |
+| --- |
+
+Acceptance criteria:
+
+- App Service Plan is P2v3 Linux with 2 workers minimum.
+
+- Web App is provisioned with Python 3.11 runtime.
+
+- System-assigned managed identity is enabled — principal ID is noted for Stage 2.
+
+- Startup command is set to Gunicorn + UvicornWorker.
+
+## 3.6 Azure Static Web Apps
+
+| **az staticwebapp create \   --name obs-prod-swa \   --resource-group obs-prod-rg \   --sku Standard \   --location ****<****region****>** |
+| --- |
+
+Acceptance criteria: Static Web App is provisioned in the Standard SKU. Default hostname is accessible over HTTPS.
+
+## 3.7 Azure Functions App (Ingestion Pipeline)
+
+Create the Azure Functions App that will host the three ingestion pipeline functions. A Consumption plan is appropriate for this workload — ingestion runs are short-lived, bursty, and infrequent (hourly, daily, and ad hoc).
+
+| **# Storage account for Functions runtime state (separate from landing zone) az storage account create \   --name obsprodfnstore \   --resource-group obs-prod-rg \   --sku Standard_LRS \   --kind StorageV2 # Functions App (Python 3.11, Linux, Consumption plan) az functionapp create \   --name obs-prod-pipeline \   --resource-group obs-prod-rg \   --consumption-plan-location ****<****region****>**** \   --runtime python \   --runtime-version 3.11 \   --functions-version 4 \   --os-type linux \   --storage-account obsprodfnstore** |
+| --- |
+
+Enable the system-assigned managed identity on the Functions App:
+
+| **az functionapp identity assign \   --name obs-prod-pipeline \   --resource-group obs-prod-rg** |
+| --- |
+
+Acceptance criteria:
+
+- Functions App is provisioned on a Consumption plan with Python 3.11 runtime.
+
+- System-assigned managed identity is enabled — principal ID noted for Stage 2.
+
+- A separate storage account (obsprodfnstore) is used for Functions runtime state, distinct from the landing zone storage account.
+
+## 3.8 Azure Monitor and Application Insights
+
+| **az monitor app-insights component create \   --app obs-prod-insights \   --resource-group obs-prod-rg \   --location ****<****region****>**** \   --kind web az keyvault secret set \   --vault-name obs-prod-kv \   --name obs-appinsights-connection-string \   --value ****"****$(az monitor app-insights component show \     --app obs-prod-insights --resource-group obs-prod-rg \     --query connectionString -o tsv)****"** |
+| --- |
+
+Acceptance criteria: Application Insights is provisioned. Connection string is stored in Key Vault as obs-appinsights-connection-string.
+
+# 4. Stage 2 — Identity and Access Configuration
+
+Configure Microsoft Entra ID for OIDC/OAuth 2.0 authentication and grant the App Service and Functions managed identities access to Key Vault and Blob Storage.
+
+## 4.1 Entra ID Application Registration
+
+Register the OBS as an OIDC Relying Party in Microsoft Entra ID:
+
+| **Property** | **Value** |
+| --- | --- |
+| Application name | OPEX Budgeting System (OBS) |
+| Supported account types | Single tenant — accounts in this organizational directory only |
+| Platform | Single-page application (SPA) |
+| Redirect URIs | https://<static-web-apps-hostname>/auth/callback and http://localhost:5173/auth/callback |
+| Logout URL | https://<static-web-apps-hostname>/auth/logout |
+| Token configuration | Enable ID tokens; add optional claims: email, name |
+| API permissions | Microsoft Graph — User.Read (delegated) |
+| Client secret | None — SPA uses PKCE flow, no client secret required |
+
+| **az keyvault secret set --vault-name obs-prod-kv --name obs-entra-client-id --value ****"****<****client-id****>****"**** az keyvault secret set --vault-name obs-prod-kv --name obs-entra-tenant-id --value ****"****<****tenant-id****>****"** |
+| --- |
+
+## 4.2 Key Vault Access — App Service Managed Identity
+
+Grant the App Service managed identity permission to read secrets from Key Vault:
+
+| **az keyvault set-policy \   --name obs-prod-kv \   --object-id ****<****app-service-principal-id****>**** \   --secret-permissions get list** |
+| --- |
+
+## 4.3 Key Vault Access — Functions App Managed Identity
+
+Grant the Functions App managed identity permission to read secrets from Key Vault:
+
+| **az keyvault set-policy \   --name obs-prod-kv \   --object-id ****<****functions-principal-id****>**** \   --secret-permissions get list** |
+| --- |
+
+## 4.4 Blob Storage Access — Functions App Managed Identity
+
+Grant the Functions App managed identity the Storage Blob Data Contributor role on the landing zone storage account:
+
+| **az role assignment create \   --assignee ****<****functions-principal-id****>**** \   --role ****"****Storage Blob Data Contributor****"**** \   --scope /subscriptions/****<****sub-id****>****/resourceGroups/obs-prod-rg/providers/Microsoft.Storage/storageAccounts/obsprodlanding** |
+| --- |
+
+## 4.5 PostgreSQL Access — App Service and Functions
+
+PostgreSQL Flexible Server uses password authentication. The connection string (including password) is stored in Key Vault and read by the App Service and Functions App at startup via their managed identities. No static credentials appear in code or configuration files.
+
+Additionally, configure the PostgreSQL firewall to allow connections from the App Service and Functions App outbound IP addresses:
+
+| **# Retrieve outbound IPs for App Service az webapp show --name obs-prod-api --resource-group obs-prod-rg \   --query outboundIpAddresses -o tsv # Add each outbound IP as a firewall rule az postgres flexible-server firewall-rule create \   --name obs-prod-pg \   --resource-group obs-prod-rg \   --rule-name allow-app-service-1 \   --start-ip-address ****<****ip****>**** \   --end-ip-address ****<****ip****>** |
+| --- |
+
+| **Claude Code note — PostgreSQL firewall and Azure Functions** | ***Azure Functions on a Consumption plan uses dynamic outbound IP addresses that can change. For a more robust configuration, consider deploying the Functions App into a Virtual Network (VNet Integration) and allowing the entire VNet subnet. Alternatively, enable the ******'******Allow access to Azure services******'****** option on the PostgreSQL firewall during initial setup and restrict it via VNet integration before going to production.*** |
+| --- | --- |
+
+## 4.6 CI/CD Service Principal
+
+| **az ad sp create-for-rbac \   --name obs-cicd-sp \   --role Contributor \   --scopes /subscriptions/****<****sub-id****>****/resourceGroups/obs-prod-rg \   --sdk-auth** |
+| --- |
+
+Store the output JSON as a CI/CD pipeline secret. Never commit to the repository.
+
+Stage 2 acceptance criteria:
+
+- Entra ID application registration exists with correct redirect URIs. Client ID and tenant ID are in Key Vault.
+
+- App Service managed identity has get and list permissions on Key Vault.
+
+- Functions App managed identity has get and list permissions on Key Vault and Storage Blob Data Contributor on the landing zone.
+
+- No static credentials appear in any source file or CI/CD definition.
+
+# 5. Stage 3 — PostgreSQL Schema Bootstrap
+
+Create all obs.* tables in the PostgreSQL database. The existing schema/bootstrap.sql was written for DuckDB. A new file — schema/bootstrap_pg.sql — must be authored for PostgreSQL. It is idempotent throughout using CREATE TABLE IF NOT EXISTS.
+
+## 5.1 PostgreSQL DDL Conversion Rules
+
+Apply the following translation rules when authoring schema/bootstrap_pg.sql from the DuckDB schema:
+
+| **DuckDB Type** | **PostgreSQL Type** | **Notes** |
+| --- | --- | --- |
+| STRING NOT NULL | TEXT NOT NULL | TEXT is the idiomatic PostgreSQL string type |
+| STRING (nullable) | TEXT | Omit NOT NULL constraint |
+| DECIMAL(15,2) | NUMERIC(15,2) | Monetary amounts |
+| DECIMAL(6,4) | NUMERIC(6,4) | Percentage rates (e.g., 0.0765) |
+| BOOLEAN NOT NULL DEFAULT FALSE | BOOLEAN NOT NULL DEFAULT FALSE | Identical syntax |
+| TIMESTAMP | TIMESTAMPTZ | Always store in UTC; TIMESTAMPTZ enforces timezone awareness |
+| STRING (UUID primary key) | UUID NOT NULL DEFAULT gen_random_uuid() | PostgreSQL native UUID; auto-generation via gen_random_uuid() removes the need for application-side UUID generation on INSERT |
+| Z-ORDER BY hints | Not applicable | Z-ORDER is a Delta Lake concept. Use PostgreSQL indexes instead. See Section 5.2. |
+| TBLPROPERTIES (delta.appendOnly) | PostgreSQL trigger | Append-only enforcement is implemented via a BEFORE UPDATE OR DELETE trigger on obs.audit_log. See Section 5.3. |
+
+## 5.2 Index Strategy
+
+Replace Delta Lake Z-ORDER hints with PostgreSQL indexes. The following indexes are the minimum required for OBS query performance. They must be included in schema/bootstrap_pg.sql:
+
+| **Table** | **Required Indexes** |
+| --- | --- |
+| obs.actuals | (cost_center_id, fiscal_year, fiscal_month) — primary filter for reporting; (is_deleted) where is_deleted = FALSE — partial index for current-version queries |
+| obs.budget_lines | (version_id, cost_center_id) — primary filter for budget planning views |
+| obs.notifications | (user_id, is_read, created_at DESC) — primary filter for notification inbox queries |
+| obs.audit_log | (entity_type, entity_id) — for entity history lookups; (user_id, event_timestamp DESC) — for user activity queries |
+| obs.positions | (cost_center_id, fiscal_year) — primary filter for workforce planning views |
+| obs.ingestion_control | (file_name, content_hash) — deduplication key lookup on every pipeline run |
+| obs.users | (entra_oid) — login resolution; (is_active) WHERE is_active = TRUE — partial index for active user lookups |
+
+## 5.3 Audit Log Append-Only Enforcement
+
+Delta Lake enforced append-only via the delta.appendOnly table property. PostgreSQL enforces it via a trigger. Include the following in schema/bootstrap_pg.sql:
+
+| **-- Trigger function: raise an error on any UPDATE or DELETE against obs.audit_log CREATE OR REPLACE FUNCTION obs.audit_log_immutable() RETURNS TRIGGER AS $$ BEGIN   RAISE EXCEPTION ****'****obs.audit_log is append-only. UPDATE and DELETE are not permitted.****'****; END; $$ LANGUAGE plpgsql; -- Apply the trigger to obs.audit_log CREATE TRIGGER enforce_audit_log_immutable BEFORE UPDATE OR DELETE ON obs.audit_log FOR EACH ROW EXECUTE FUNCTION obs.audit_log_immutable();** |
+| --- |
+
+| **Claude Code note — audit log enforcement parity** | ***The application-layer enforcement (never calling UPDATE or DELETE on obs.audit_log) remains in place as required by the Claude Code Implementation Guide Rule 5. The PostgreSQL BEFORE UPDATE OR DELETE trigger adds a second enforcement layer at the database level. Both layers are required.*** |
+| --- | --- |
+
+## 5.4 Bootstrap Execution
+
+| **# From the repository root, with psql installed psql ****"****$(az keyvault secret show --vault-name obs-prod-kv \   --name obs-pg-connection-string --query value -o tsv)****"**** \   -f schema/bootstrap_pg.sql** |
+| --- |
+
+The bootstrap is idempotent. All CREATE TABLE, CREATE INDEX, and CREATE TRIGGER statements use IF NOT EXISTS (or OR REPLACE for functions). It is safe to re-run after a partial failure.
+
+## 5.5 Schema Bootstrap Acceptance Criteria
+
+| **Criterion** | **Verification** |
+| --- | --- |
+| All obs.* tables exist | SELECT table_name FROM information_schema.tables WHERE table_schema = 'obs' returns all expected table names. |
+| obs.audit_log trigger is active | SELECT trigger_name FROM information_schema.triggers WHERE event_object_table = 'audit_log' returns enforce_audit_log_immutable. |
+| Append-only is enforced | Execute: UPDATE obs.audit_log SET outcome = 'FAILURE' WHERE 1=0; Expect: ERROR — obs.audit_log is append-only. |
+| All indexes are created | SELECT indexname FROM pg_indexes WHERE schemaname = 'obs' lists all required indexes from Section 5.2. |
+| UUID auto-generation works | INSERT INTO obs.users (user_id, ...) VALUES (gen_random_uuid(), ...) succeeds without application-side UUID generation. |
+
+## 5.6 Production Data Seeding
+
+| **Data** | **Action Required** |
+| --- | --- |
+| First Administrator user | INSERT one record into obs.users with is_administrator = TRUE and is_active = TRUE using the Entra ID oid of the designated system administrator. |
+| Fiscal calendar | Insert the current fiscal year definition. The system requires at least one active fiscal year to be operational. |
+| Cost center hierarchy | Import via the Administrator landing zone upload after deployment. |
+| Account hierarchy | Import via the Administrator landing zone upload after deployment. |
+| Business rules | Enter via the Administration module Business Rules Configuration screen after deployment. |
+
+| **Claude Code note — do not run dev seed scripts against production** | ***The schema/seed/ scripts (01_users.sql through 07_actuals.sql) contain synthetic DuckDB development data. They must never be executed against the production PostgreSQL database. The DuckDB seed data also uses DuckDB-specific syntax that is not valid PostgreSQL SQL.*** |
+| --- | --- |
+
+# 6. Stage 4 — Code Changes — PostgreSQL Engine Branch
+
+This is the only stage that requires changes to the application codebase. All changes are confined to the database access layer. No changes are required to routers, services, Pydantic models, or frontend code.
+
+| **Claude Code note — scope of code changes** | ***The hosting-agnostic design means the API layer, calculation service, auth middleware, and all business logic are entirely unaffected. The four files that require changes are: backend/requirements.txt (add psycopg2-binary), backend/app/db/engine.py (add postgresql branch), backend/app/db/helpers.py (add _pg_upsert for the merge() function), and schema/bootstrap_pg.sql (new file authored in Stage 3). The pipeline scripts are replaced in Stage 6.*** |
+| --- | --- |
+
+## 6.1 requirements.txt — Add psycopg2
+
+Add psycopg2-binary to backend/requirements.txt. This is the standard PostgreSQL adapter for Python. The binary distribution is used to avoid requiring a local libpq compilation step:
+
+| **# backend/requirements.txt — additions only psycopg2-binary****>****=2.9** |
+| --- |
+
+Remove the following packages from requirements.txt — they are not used by the PostgreSQL data platform:
+
+| **# Remove these lines from backend/requirements.txt databricks-sql-connector   # superseded by psycopg2-binary delta-spark                # superseded by PostgreSQL INSERT ... ON CONFLICT DO UPDATE** |
+| --- |
+
+| **Claude Code note — duckdb package is retained** | ***The duckdb package must remain in requirements.txt. The local development environment continues to use DB_ENGINE=duckdb. Removing duckdb from requirements.txt would break the local development workflow.*** |
+| --- | --- |
+
+## 6.2 engine.py — Add postgresql Branch
+
+Add the postgresql branch to get_connection() in backend/app/db/engine.py. The existing duckdb branch is unchanged. DB_ENGINE legal values are duckdb and postgresql.
+
+| **# backend/app/db/engine.py — full replacement import contextlib from app.config import settings @contextlib.contextmanager def get_connection():     ****"****"****"****     Return a database connection for the active DB_ENGINE.     Supported values:       duckdb      — local development (DuckDB file)       postgresql  — production / staging (Azure PostgreSQL Flexible Server)     ****"****"****"****     if settings.DB_ENGINE == ****'****duckdb****'****:         import duckdb         conn = duckdb.connect(settings.DUCKDB_PATH)         try:             yield conn         finally:             conn.close()     elif settings.DB_ENGINE == ****'****postgresql****'****:         import psycopg2         import psycopg2.extras  # for RealDictCursor         conn = psycopg2.connect(             settings.PG_CONNECTION_STRING,             cursor_factory=psycopg2.extras.RealDictCursor         )         conn.autocommit = False  # explicit transaction management         try:             yield conn             conn.commit()         except Exception:             conn.rollback()             raise         finally:             conn.close()     else:         raise ValueError(f****"****Unknown DB_ENGINE: {settings.DB_ENGINE!r}. ****"****                          ****"****Must be one of: duckdb, postgresql****"****)** |
+| --- |
+
+| **Claude Code note — RealDictCursor** | ***psycopg2.extras.RealDictCursor returns query results as dictionaries keyed by column name, matching the behaviour of DuckDB******'******s fetchdf() result access pattern. This ensures that all existing query code — which accesses result columns by name — works identically against both engines without modification.*** |
+| --- | --- |
+
+## 6.3 config.py — Add PG_CONNECTION_STRING Setting
+
+Add PG_CONNECTION_STRING to the Settings class in backend/app/config.py. This follows the same pattern as DUCKDB_PATH:
+
+| **# backend/app/config.py — additions to the Settings class class Settings(BaseSettings):     # ... existing fields ...     # Database engine selection     DB_ENGINE: str = ****"****duckdb****"****  # duckdb │ postgresql     # DuckDB (local development only)     DUCKDB_PATH: str = ****"****./local-data/obs.duckdb****"****     # PostgreSQL (production / staging)     # Value is read from Azure Key Vault via environment variable injection.     # Format: ****"****host=****<****host****>**** port=5432 dbname=obs_db user=****<****user****>**** password=****<****pw****>**** sslmode=require****"****     PG_CONNECTION_STRING: str = ****"****"****     class Config:         env_file = ****"****.env.local****"****         env_file_encoding = ****"****utf-8****"** |
+| --- |
+
+## 6.4 helpers.py — Add _pg_upsert for merge()
+
+The merge() helper in backend/app/db/helpers.py currently branches on duckdb. Add a postgresql branch. PostgreSQL supports native INSERT ... ON CONFLICT DO UPDATE, which provides true atomic upsert:
+
+| **# backend/app/db/helpers.py — merge() function replacement def merge(conn, table: str, records: list, key_cols: list):     ****"****"****"****     Idempotent upsert across all supported DB_ENGINE values.     duckdb:      DELETE + INSERT (DuckDB has no native upsert)     postgresql:  INSERT ... ON CONFLICT DO UPDATE (atomic upsert)     ****"****"****"****     from app.config import settings     if not records:         return     if settings.DB_ENGINE == ****'****duckdb****'****:         _duckdb_upsert(conn, table, records, key_cols)     elif settings.DB_ENGINE == ****'****postgresql****'****:         _pg_upsert(conn, table, records, key_cols)     else:         raise RuntimeError(f****"****merge() not supported for DB_ENGINE={settings.DB_ENGINE!r}****"****) def _pg_upsert(conn, table: str, records: list, key_cols: list):     ****"****"****"****     PostgreSQL INSERT ... ON CONFLICT (key_cols) DO UPDATE SET ...     This is a true atomic upsert — no intermediate DELETE step.     ****"****"****"****     if not records:         return     cols      = list(records[0].keys())     update_cols = [c for c in cols if c not in key_cols]     col_names    = ****'****, ****'****.join(cols)     placeholders = ****'****, ****'****.join(f****'****%({c})s****'**** for c in cols)     conflict_target = ****'****, ****'****.join(key_cols)     update_clause = ****'****, ****'****.join(f****'****{c} = EXCLUDED.{c}****'**** for c in update_cols)     sql = f****"****"****"****         INSERT INTO {table} ({col_names})         VALUES ({placeholders})         ON CONFLICT ({conflict_target})         DO UPDATE SET {update_clause}     ****"****"****"****     with conn.cursor() as cur:         cur.executemany(sql, records) # _duckdb_upsert() — unchanged, retained below def _duckdb_upsert(conn, table: str, records: list, key_cols: list):     if not records:         return     where = ****'**** AND ****'****.join(f****'****{k} = ?****'**** for k in key_cols)     for record in records:         key_values = [record[k] for k in key_cols]         conn.execute(f****'****DELETE FROM {table} WHERE {where}****'****, key_values)     cols = list(records[0].keys())     placeholders = ****'****, ****'****.join(****'****?****'**** * len(cols))     col_names = ****'****, ****'****.join(cols)     conn.executemany(         f****'****INSERT INTO {table} ({col_names}) VALUES ({placeholders})****'****,         [[r[c] for c in cols] for r in records]     )** |
+| --- |
+
+## 6.5 audit_write() — PostgreSQL Compatibility
+
+The audit_write() helper in backend/app/db/helpers.py uses positional ? placeholders (DuckDB syntax). PostgreSQL uses %s positional placeholders or %(name)s named placeholders. Update audit_write() to use named placeholders that work with psycopg2:
+
+| **# backend/app/db/helpers.py — audit_write() replacement import uuid import datetime import json def audit_write(conn, event_type: str, user_id: str, entity_type: str,                 entity_id: str, previous_value=None, new_value=None, **kwargs):     ****"****"****"****     Write an immutable record to obs.audit_log.     obs.audit_log is append-only — never call UPDATE or DELETE on it.     If this write fails, the calling transaction must roll back.     ****"****"****"****     from app.config import settings     record = {         ****'****event_id****'****:       str(uuid.uuid4()),         ****'****event_timestamp****'****: datetime.datetime.utcnow(),         ****'****event_type****'****:     event_type,         ****'****user_id****'****:        user_id,         ****'****session_id****'****:     kwargs.get(****'****session_id****'****),         ****'****entity_type****'****:    entity_type,         ****'****entity_id****'****:      entity_id,         ****'****previous_value****'****: json.dumps(previous_value) if previous_value is not None else None,         ****'****new_value****'****:      json.dumps(new_value) if new_value is not None else None,         ****'****ip_address****'****:     kwargs.get(****'****ip_address****'****),         ****'****outcome****'****:        ****'****SUCCESS****'****,     }     if settings.DB_ENGINE == ****'****duckdb****'****:         conn.execute(             ****'****INSERT INTO obs.audit_log VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)****'****,             list(record.values())         )     elif settings.DB_ENGINE == ****'****postgresql****'****:         sql = ****"****"****"****             INSERT INTO obs.audit_log               (event_id, event_timestamp, event_type, user_id, session_id,                entity_type, entity_id, previous_value, new_value, ip_address, outcome)             VALUES               (%(event_id)s, %(event_timestamp)s, %(event_type)s, %(user_id)s,                %(session_id)s, %(entity_type)s, %(entity_id)s,                %(previous_value)s, %(new_value)s, %(ip_address)s, %(outcome)s)         ****"****"****"****         with conn.cursor() as cur:             cur.execute(sql, record)** |
+| --- |
+
+## 6.6 Code Change Acceptance Criteria
+
+Before deploying to App Service, verify all code changes locally against DuckDB to confirm nothing is broken:
+
+- make test-unit passes with zero failures after all code changes are applied.
+
+- DB_ENGINE=duckdb make api — the server starts without import errors. GET /health returns HTTP 200.
+
+- DB_ENGINE=postgresql with a local PostgreSQL instance (e.g., via Docker) — the server starts, connects, and GET /health returns HTTP 200.
+
+- get_connection() raises ValueError for any DB_ENGINE value other than duckdb or postgresql — confirm via a targeted unit test.
+
+- No ? placeholders remain in any SQL executed via psycopg2 — psycopg2 uses %s or %(name)s only.
+
+| **Claude Code note — SQL placeholder audit** | ***Before deploying, run a search across all backend SQL strings to confirm no DuckDB-style ? placeholders are used in code paths that execute against PostgreSQL. The correct approach is to use named placeholders %(name)s throughout, which also work with DuckDB via the parameter dict syntax. Consider migrating all SQL to use named placeholders in a single pass to eliminate the divergence entirely.*** |
+| --- | --- |
+
+# 7. Stage 5 — Application Deployment and Configuration
+
+Deploy the FastAPI backend to App Service and the React SPA to Static Web Apps. Configure all environment variables and Key Vault references. Activate the Entra ID OIDC authentication flow.
+
+## 7.1 App Service Environment Variable Mapping
+
+| **Variable** | **Local Value** | **Production Value / Source** |
+| --- | --- | --- |
+| LOCAL_AUTH_BYPASS | true | Must be absent or false. Startup assertion enforces this. |
+| LOCAL_AUTH_USER_* | (dev credentials) | Remove entirely — not present in production. |
+| DB_ENGINE | duckdb | postgresql |
+| PG_CONNECTION_STRING | (not used locally) | @Microsoft.KeyVault(SecretUri=https://obs-prod-kv.vault.azure.net/secrets/obs-pg-connection-string/) |
+| ENTRA_TENANT_ID | (not used locally) | @Microsoft.KeyVault(SecretUri=https://obs-prod-kv.vault.azure.net/secrets/obs-entra-tenant-id/) |
+| ENTRA_CLIENT_ID | (not used locally) | @Microsoft.KeyVault(SecretUri=https://obs-prod-kv.vault.azure.net/secrets/obs-entra-client-id/) |
+| BLOB_STORAGE_CONNECTION_STRING | (not used locally) | @Microsoft.KeyVault(SecretUri=https://obs-prod-kv.vault.azure.net/secrets/obs-blob-storage-connection-string/) |
+| ALERT_CHANNEL | console | teams or email |
+| CORS_ALLOWED_ORIGINS | http://localhost:5173 | @Microsoft.KeyVault(SecretUri=https://obs-prod-kv.vault.azure.net/secrets/obs-cors-allowed-origins/) |
+| LOG_LEVEL | DEBUG | INFO |
+| APPLICATIONINSIGHTS_CONNECTION_STRING | (not used locally) | @Microsoft.KeyVault(SecretUri=https://obs-prod-kv.vault.azure.net/secrets/obs-appinsights-connection-string/) |
+
+The @Microsoft.KeyVault() reference syntax allows App Service to resolve secrets from Key Vault at runtime using the managed identity — no secret value appears in the App Service configuration UI or in code.
+
+Apply all environment variables:
+
+| **az webapp config appsettings set \   --name obs-prod-api \   --resource-group obs-prod-rg \   --settings \     DB_ENGINE=postgresql \     ****"****PG_CONNECTION_STRING=@Microsoft.KeyVault(SecretUri=https://obs-prod-kv.vault.azure.net/secrets/obs-pg-connection-string/)****"**** \     ****"****ENTRA_TENANT_ID=@Microsoft.KeyVault(SecretUri=https://obs-prod-kv.vault.azure.net/secrets/obs-entra-tenant-id/)****"**** \     ****"****ENTRA_CLIENT_ID=@Microsoft.KeyVault(SecretUri=https://obs-prod-kv.vault.azure.net/secrets/obs-entra-client-id/)****"**** \     ****"****BLOB_STORAGE_CONNECTION_STRING=@Microsoft.KeyVault(SecretUri=https://obs-prod-kv.vault.azure.net/secrets/obs-blob-storage-connection-string/)****"**** \     ALERT_CHANNEL=teams \     LOG_LEVEL=INFO \     ****"****APPLICATIONINSIGHTS_CONNECTION_STRING=@Microsoft.KeyVault(SecretUri=https://obs-prod-kv.vault.azure.net/secrets/obs-appinsights-connection-string/)****"** |
+| --- |
+
+## 7.2 App Service Deployment
+
+| **# From repository root # Build deployment package and deploy via zip deploy zip -r obs-backend.zip backend/ schema/ requirements.txt az webapp deploy \   --name obs-prod-api \   --resource-group obs-prod-rg \   --src-path obs-backend.zip \   --type zip** |
+| --- |
+
+Acceptance criteria:
+
+- GET https://obs-prod-api.azurewebsites.net/health returns HTTP 200.
+
+- The startup assertion for LOCAL_AUTH_BYPASS does not raise.
+
+- DB_ENGINE=postgresql is confirmed active — Application Insights shows successful PostgreSQL connection traces.
+
+## 7.3 Frontend Deployment to Static Web Apps
+
+Frontend environment variables for the production build:
+
+| **Variable** | **Production Value** |
+| --- | --- |
+| VITE_API_BASE_URL | https://obs-prod-api.azurewebsites.net — the App Service API endpoint. |
+| VITE_AUTH_ENABLED | true — activates the real Entra ID MSAL/OIDC login flow. |
+| VITE_ENTRA_CLIENT_ID | The OBS application client ID from Entra ID registration (Section 4.1). |
+| VITE_ENTRA_TENANT_ID | The Entra ID tenant ID. |
+| VITE_ENTRA_REDIRECT_URI | https://<static-web-apps-hostname>/auth/callback — must match the registered redirect URI exactly. |
+
+| **cd frontend npm run build # Output: frontend/dist az staticwebapp deploy \   --name obs-prod-swa \   --resource-group obs-prod-rg \   --app-location frontend \   --output-location dist** |
+| --- |
+
+Acceptance criteria:
+
+- The SPA loads at the Static Web Apps hostname over HTTPS.
+
+- The Entra ID login redirect initiates for unauthenticated users.
+
+- After authentication, an Entra ID account with no obs.users record receives a login-denied message, not an application error.
+
+- VITE_AUTH_ENABLED=false is not present in the production build.
+
+## 7.4 CORS Validation
+
+| **# Must succeed — returns Access-Control-Allow-Origin header curl -H ****"****Origin: https://****<****static-web-apps-hostname****>****"**** \      -H ****"****Access-Control-Request-Method: GET****"**** \      -X OPTIONS \      https://obs-prod-api.azurewebsites.net/api/v1/me # Must be blocked — no Access-Control-Allow-Origin header curl -H ****"****Origin: https://malicious.example.com****"**** \      -H ****"****Access-Control-Request-Method: GET****"**** \      -X OPTIONS \      https://obs-prod-api.azurewebsites.net/api/v1/me** |
+| --- |
+
+# 8. Stage 6 — Azure Functions Ingestion Pipeline
+
+Deploy three Azure Functions as the ingestion pipeline. The pipeline logic (file detection, validation, staging, promotion) is unchanged from the existing pipeline scripts. Only the execution host and trigger mechanism change.
+
+## 8.1 Function Definitions
+
+| **Function Name** | **Trigger Type** | **Behaviour** |
+| --- | --- | --- |
+| obs_actuals_ingestion | Timer trigger — cron: 0 0 * * * * (every hour on the hour) | Scans the landing-actuals Blob Storage container for new files not recorded in obs.ingestion_control. Processes all new files per pipeline step sequence. |
+| obs_employees_ingestion | Timer trigger — cron: 0 0 2 * * * (daily at 02:00 UTC) | Scans the landing-employees container for new files and processes them. |
+| obs_hierarchy_ingestion | Blob Storage trigger — fires on new blob created in landing-hierarchies container | Processes the triggering file immediately on arrival. |
+
+| **Claude Code note — Azure Functions feasibility for this workload** | ***Azure Functions on a Consumption plan is well-suited to the OBS ingestion workload. Actuals files are processed hourly; employee files daily; hierarchy files ad hoc. None of these are high-frequency or long-running jobs. The Consumption plan******'******s 10-minute maximum execution timeout is sufficient for typical file volumes. If a single ingestion run exceeds 10 minutes due to an unusually large file, upgrade to a Premium plan (60-minute timeout) or Dedicated plan (unlimited). Monitor execution duration via Application Insights from day one.*** |
+| --- | --- |
+
+## 8.2 Repository Structure Changes for Azure Functions
+
+Create a new top-level directory in the monorepo for the Azure Functions app. The existing pipeline scripts in backend/pipeline/ are refactored into Azure Functions entry points:
+
+| **obs/ ├── pipeline-functions/          # NEW — Azure Functions app │   ├── host.json                # Functions host configuration │   ├── requirements.txt         # Pipeline-specific dependencies (psycopg2-binary, pandas, openpyxl, azure-storage-blob) │   ├── obs_actuals_ingestion/ │   │   ├── __init__.py          # Function entry point — calls actuals_pipeline.run() │   │   └── function.json        # Timer trigger binding definition │   ├── obs_employees_ingestion/ │   │   ├── __init__.py          # Function entry point — calls employees_pipeline.run() │   │   └── function.json        # Timer trigger binding definition │   └── obs_hierarchy_ingestion/ │       ├── __init__.py          # Function entry point — calls hierarchy_pipeline.run() │       └── function.json        # Blob Storage trigger binding definition └── backend/     └── pipeline/                # Existing — pipeline logic moved here unchanged         ├── actuals_pipeline.py  # Core logic; now called by the Function entry point         ├── employees_pipeline.py         └── hierarchy_pipeline.py** |
+| --- |
+
+## 8.3 Function Binding Definitions
+
+host.json — Functions app-level configuration:
+
+| **{   ****"****version****"****: ****"****2.0****"****,   ****"****logging****"****: {     ****"****applicationInsights****"****: {       ****"****samplingSettings****"****: { ****"****isEnabled****"****: true }     }   },   ****"****functionTimeout****"****: ****"****00:10:00****"**** }** |
+| --- |
+
+obs_actuals_ingestion/function.json — hourly timer trigger:
+
+| **{   ****"****scriptFile****"****: ****"****__init__.py****"****,   ****"****bindings****"****: [     {       ****"****name****"****: ****"****timer****"****,       ****"****type****"****: ****"****timerTrigger****"****,       ****"****direction****"****: ****"****in****"****,       ****"****schedule****"****: ****"****0 0 ***** ***** ***** *****"****,       ****"****runOnStartup****"****: false     }   ] }** |
+| --- |
+
+obs_hierarchy_ingestion/function.json — Blob Storage trigger:
+
+| **{   ****"****scriptFile****"****: ****"****__init__.py****"****,   ****"****bindings****"****: [     {       ****"****name****"****: ****"****inputBlob****"****,       ****"****type****"****: ****"****blobTrigger****"****,       ****"****direction****"****: ****"****in****"****,       ****"****path****"****: ****"****landing-hierarchies/{name}****"****,       ****"****connection****"****: ****"****BLOB_STORAGE_CONNECTION_STRING****"****     }   ] }** |
+| --- |
+
+obs_hierarchy_ingestion/__init__.py — Blob trigger entry point pattern:
+
+| **# pipeline-functions/obs_hierarchy_ingestion/__init__.py import logging import azure.functions as func from backend.pipeline.hierarchy_pipeline import run def main(inputBlob: func.InputStream) -****>**** None:     logging.info(f****"****OBS hierarchy ingestion triggered for blob: {inputBlob.name}****"****)     run(blob_name=inputBlob.name, blob_content=inputBlob.read())** |
+| --- |
+
+## 8.4 Functions App Environment Variables
+
+| **az functionapp config appsettings set \   --name obs-prod-pipeline \   --resource-group obs-prod-rg \   --settings \     DB_ENGINE=postgresql \     ****"****PG_CONNECTION_STRING=@Microsoft.KeyVault(SecretUri=https://obs-prod-kv.vault.azure.net/secrets/obs-pg-connection-string/)****"**** \     ****"****BLOB_STORAGE_CONNECTION_STRING=@Microsoft.KeyVault(SecretUri=https://obs-prod-kv.vault.azure.net/secrets/obs-blob-storage-connection-string/)****"**** \     ALERT_CHANNEL=teams \     LOG_LEVEL=INFO \     ****"****APPLICATIONINSIGHTS_CONNECTION_STRING=@Microsoft.KeyVault(SecretUri=https://obs-prod-kv.vault.azure.net/secrets/obs-appinsights-connection-string/)****"** |
+| --- |
+
+## 8.5 Functions App Deployment
+
+| **# From repository root cd pipeline-functions func azure functionapp publish obs-prod-pipeline --python** |
+| --- |
+
+## 8.6 Idempotency Verification
+
+Before activating production triggers, verify idempotency for each pipeline function:
+
+- Drop a test actuals file into the landing-actuals container.
+
+- Trigger obs_actuals_ingestion manually via the Azure Portal or Azure Functions Core Tools.
+
+- Verify obs.ingestion_control has a COMPLETED record with the correct file_name and content_hash.
+
+- Drop the same file again (identical content).
+
+- Trigger obs_actuals_ingestion again. Verify: no duplicate records in obs.actuals; obs.ingestion_control shows the second run was skipped (file_name + content_hash already COMPLETED).
+
+- Repeat this procedure for obs_employees_ingestion and obs_hierarchy_ingestion.
+
+| **Claude Code note — PostgreSQL upsert idempotency** | ***The _pg_upsert() function uses INSERT ... ON CONFLICT DO UPDATE, which is inherently idempotent when the conflict target matches the natural deduplication key. The obs.ingestion_control file-level deduplication check (file_name + content_hash) is the first gate. If a file passes the gate, _pg_upsert() ensures that even if the pipeline runs the promotion step twice, no duplicate records are created. Both gates must be verified as described above.*** |
+| --- | --- |
+
+Stage 6 acceptance criteria:
+
+- All three functions appear in the Azure Portal under obs-prod-pipeline with status Enabled.
+
+- obs_actuals_ingestion runs on the hourly schedule — confirmed via execution history in Application Insights.
+
+- obs_employees_ingestion runs on the daily schedule — confirmed via execution history.
+
+- obs_hierarchy_ingestion fires within 60 seconds of a new blob appearing in landing-hierarchies.
+
+- Idempotency verified for all three functions per Section 8.6 procedure.
+
+- Pipeline errors (validation failures, file-level rejections) are delivered to the ALERT_CHANNEL (teams or email), not to console only.
+
+# 9. Stage 7 — End-to-End Validation
+
+Execute the following validation sequence in the production environment. This sequence follows the full budget cycle path and must be completed before any real users are provisioned.
+
+| **Step** | **Action** | **Expected Result** |
+| --- | --- | --- |
+| 1 | Authenticate as the first Administrator user | Entra ID login completes. OBS application shell loads. User's is_administrator flag is confirmed active via GET /api/v1/me. |
+| 2 | Provision a second test user via the User Management screen | User record appears in obs.users in PostgreSQL. Audit log records the creation event. |
+| 3 | Drop a cost center hierarchy CSV into the landing-hierarchies container | obs_hierarchy_ingestion fires within 60 seconds. obs.cost_center_hierarchy_nodes is populated. obs.ingestion_control records a COMPLETED entry. |
+| 4 | Drop an account hierarchy CSV into the landing-hierarchies container | obs.expense_accounts and obs.account_hierarchy_nodes are populated. |
+| 5 | Drop an employee file into landing-employees; trigger obs_employees_ingestion manually | obs.employees is populated. Dropping the same file again and re-triggering produces no duplicates. |
+| 6 | Drop an actuals file into landing-actuals; trigger obs_actuals_ingestion manually | obs.actuals is populated. Quarantine cases appear in obs.quarantine. obs.ingestion_control records the run. |
+| 7 | Enter a budget version and budget lines via the Budget Planning module | Budget lines are persisted in obs.budget_lines in PostgreSQL. Audit log records all mutations. |
+| 8 | Submit the budget version via the Finance Approval Workflow | obs.finance_review_records is created. Finance Reviewer receives a notification in the in-application notification inbox. |
+| 9 | Approve the budget as a Finance Reviewer | Budget version status updates to Approved. Audit log records the approval event. |
+| 10 | Run an actuals vs budget report | Report renders with data from obs.actuals and obs.budget_lines. Excel export downloads a correctly formatted xlsx file within 10 seconds. |
+
+# 10. Environment-Specific Configuration Summary
+
+| **Configuration Item** | **Local Dev** | **Staging** | **Production** |
+| --- | --- | --- | --- |
+| LOCAL_AUTH_BYPASS | true | false (absent) | false (absent) |
+| DB_ENGINE | duckdb | postgresql | postgresql |
+| VITE_AUTH_ENABLED | false | true | true |
+| Data source | DuckDB file (synthetic) | PostgreSQL Flexible Server (anonymized) | PostgreSQL Flexible Server (live) |
+| API host | Uvicorn localhost:8000 | Azure App Service (staging slot) | Azure App Service (production) |
+| Frontend host | Vite dev server localhost:5173 | Azure Static Web Apps (staging) | Azure Static Web Apps (production) |
+| Ingestion pipeline | Local filesystem scripts (make pipeline-*) | Azure Functions (staging Functions App) | Azure Functions (production Functions App) |
+| Landing zone | local-data/landing-zone/ (filesystem) | Azure Blob Storage (staging account) | Azure Blob Storage (production account) |
+| Secrets management | .env.local files (git-ignored) | Azure Key Vault (staging vault) | Azure Key Vault (production vault) |
+| Alert channel | console | teams or email | teams or email |
+| Monitoring | None (console only) | Application Insights (staging) | Application Insights (production) |
+
+# 11. Migration Acceptance Criteria
+
+All criteria below must pass before the migration is considered complete and production traffic is accepted.
+
+| **AC-PG-ID** | **Acceptance Criterion** |
+| --- | --- |
+| **AC-PG-01** | All obs.* tables exist in the PostgreSQL obs schema. SELECT COUNT(*) on every table returns without error. |
+| **AC-PG-02** | The obs.audit_log immutable trigger is active. An UPDATE or DELETE against obs.audit_log returns an error from the trigger. |
+| **AC-PG-03** | LOCAL_AUTH_BYPASS is absent from all production and staging environment configurations. The startup assertion raises an error if LOCAL_AUTH_BYPASS=true on a non-localhost host. |
+| **AC-PG-04** | GET /health on the App Service API endpoint returns HTTP 200 with DB_ENGINE=postgresql active. |
+| **AC-PG-05** | The Entra ID OIDC login flow completes for a provisioned OBS user. An Entra ID account with no obs.users record is denied with HTTP 403, not an application error. |
+| **AC-PG-06** | CORS blocks requests from any origin other than the registered production frontend hostname. |
+| **AC-PG-07** | No hardcoded credentials exist in any source file, configuration file, or CI/CD definition. |
+| **AC-PG-08** | App Service resolves all Key Vault references successfully at startup — confirmed by the absence of Key Vault resolution errors in Application Insights. |
+| **AC-PG-09** | The _pg_upsert() function produces no duplicate records when the merge() helper is called twice with the same records and key columns. |
+| **AC-PG-10** | All three Azure Functions are deployed, enabled, and executing on their configured triggers. Idempotency verified per Section 8.6 for all three functions. |
+| **AC-PG-11** | The full budget cycle end-to-end validation in Section 9 completes without error across all 10 steps. |
+| **AC-PG-12** | Excel export produces a correctly formatted xlsx file within 10 seconds for a representative report dataset. |
+| **AC-PG-13** | Application Insights receives telemetry (request traces, PostgreSQL dependency traces) within 5 minutes of the first authenticated API request. |
+| **AC-PG-14** | make test-unit passes with zero failures after all code changes in Stage 4 are applied. |
+| **AC-PG-15** | At least one active Administrator, one active fiscal year, one cost center hierarchy node, and one account hierarchy node exist in the production PostgreSQL database. |
+
+# 12. Open Items Requiring Resolution Before Migration
+
+| **#** | **Open Item** | **Owner / Resolution Path** |
+| --- | --- | --- |
+| 1 | Confirm the target Azure region for all resources. | Infrastructure / project lead to confirm. |
+| 2 | Confirm PostgreSQL SKU adequacy. Standard_D2s_v3 (2 vCores, 8 GB RAM) is specified. For 50–200 users with budget cycle load peaks, this is a reasonable starting point; validate under load testing and scale up if needed. | Development team to confirm via load testing in staging. |
+| 3 | Confirm Azure Functions Consumption plan timeout is sufficient. If any single ingestion run is expected to exceed 10 minutes, upgrade to Premium plan before go-live. | Development team to measure pipeline execution time against representative file sizes. |
+| 4 | Confirm PostgreSQL firewall strategy for Azure Functions. Dynamic outbound IPs on the Consumption plan may require VNet Integration for a stable firewall rule. Evaluate before Stage 2. | Infrastructure team to decide: VNet Integration vs Allow Azure Services. |
+| 5 | schema/bootstrap_pg.sql must be authored (Stage 3) before Stages 4 through 7 can proceed. Assign this task explicitly. | Development team to author and peer-review before Stage 3 execution. |
+| 6 | Confirm Microsoft Teams webhook URL or email SMTP configuration for the ALERT_CHANNEL pipeline notification target. | System administrator / IT to provide. |
+| 7 | Confirm that all SQL in the existing pipeline scripts uses named placeholders compatible with psycopg2 %(name)s syntax, or schedule the SQL placeholder audit described in Section 6.6. | Development team to complete audit before Stage 5 deployment. |
+
+# 13. Document Change Log
+
+| **Version** | **Status** | **Author** | **Summary of Changes** |
+| --- | --- | --- | --- |
+| 1.0 — Initial Release | For Review | TBD | Initial PostgreSQL migration specification, issued as the non-Databricks variant of the Azure cloud migration. |
+| 2.0 — Canonical Baseline | For Review | Claude | Promoted to the canonical Azure cloud migration specification for OBS and renamed to OBS_Azure_Cloud_Migration_Specification_v2_0.docx. The Databricks-based migration specification is withdrawn from the deliverable set. Removed all "variant" framing. Reframed §1.1 ADRs (ADR-PG-01 through ADR-PG-04) from deviations against Architecture Spec v3.5 to the implementation of the Architecture Spec v3.6 baseline. Updated all dependency and section pointers from v3.5 to v3.6. §3.5 hosting reframed as the single App Service track (fallback framing removed). §6.2 engine.py reduced to a duckdb / postgresql switch — the delta branch was removed and DB_ENGINE legal values are now duckdb and postgresql. §6.1, §6.4, §6.6, and §8 references to Databricks Workflows and the delta branch removed. Delta Lake is named only in the §5.1–§5.3 conversion rationale that records what each PostgreSQL-native mechanism replaces. |
+
+OBS_Azure_Cloud_Migration_Specification_v2_0.docx Page
+
+Page  of

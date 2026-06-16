@@ -1,0 +1,137 @@
+OPEX Budgeting System  —  Project Context Handoff  —  v2.4 Draft**	CONFIDENTIAL | DRAFT**
+
+OPEX Budgeting System — Project Context Handoff — v2.4 Draft
+
+**OPEX Budgeting System**
+
+**Project Context Handoff**
+
+*Version 2.4 — Draft*
+
+*OBS_Project_Context_Handoff_v2_4.docx*
+
+| **Document title** | **Project Context Handoff** |
+| --- | --- |
+| **System** | OPEX Budgeting System (OBS) |
+| **Version** | 2.4 — Draft |
+| **Status** | For Review |
+
+| ***Amendment: v2.3 → v2.4 — Databricks-free platform cascade aligned to Application Architecture Specification v3.6, plus version-reference corrections per Specification Consistency & Errata Report v1.0. Changes in this amendment: Section 1.1 — Architecture status updated to v3.6 and to the Azure-only platform summary (Azure PostgreSQL Flexible Server, Azure App Service, Azure Functions); all specification status and version references refreshed to current versions (Security v1.4, UX/UI v1.5, Data Integration v1.6, In-Application Notification Mechanism Specification v1.1, Workforce Planning v1.1, System Context and Domain Glossary v1.11). The Databricks-based Azure migration specification is withdrawn; the canonical migration specification is OBS_Azure_Cloud_Migration_Specification_v2_0. Section 4 — Document library and related-document version references updated for the cascade. Section 8 — Document control: v2.4 and errata rows added. Historical Document Control rows and open-item resolution narratives describing past events are unchanged.*** |
+| --- |
+
+# 1. Project State Summary
+
+| **Phase** | **Specification authoring complete. All open items across all specifications are resolved. No outstanding items remain. The system is ready for implementation.** |
+| --- | --- |
+| **Architecture status** | Application Architecture Specification v3.6 is the current version. The OBS platform is Azure-only: Azure PostgreSQL Flexible Server (data platform), Azure App Service (Linux, Python 3.11 — single API host), and Azure Functions (batch ingestion). |
+| **Security status** | Security and Access Control Specification v1.4 complete. |
+| **UX / UI status** | UX and UI Specification v1.5 complete. |
+| **Data integration status** | Data Integration Specification v1.6 complete. All open items resolved. |
+| **Functional requirements status** | Budget Planning v1.1 complete. Workforce Planning v1.1 complete. Reporting v1.1 complete — all open items resolved (OI-RPT-01). Finance Approval Workflow v1.2 complete. |
+| **Notification mechanism status** | In-Application Notification Mechanism Specification v1.1 complete. All companion amendments issued. |
+| **Outstanding blocking items** | None. All open items across all specifications are resolved. The system is ready for implementation. |
+
+# 2. Architecture and Design Decisions
+
+*Sections 2.1 through 3.11 carry forward from Project Context Handoff v2.2 without amendment. Section 3.12 is added in this amendment.*
+
+## 2.1 through 3.11 — Carried Forward
+
+*All decisions recorded in Sections 2.1 through 3.11 of Project Context Handoff v2.2 remain in force without amendment. Refer to v2.2 for the full decision record for: budget line entry, budget version management, overhead allocation, budget entry locking, budget submission workflow, cost center hierarchy boundary, workforce planning, AIPEIP bonus, compensation burden, transfer workflow, finance approval workflow, notification mechanism, report definition authoring, Data Integration open item resolutions, Budget Planning open item resolutions, and Finance Approval Workflow open item resolution.*
+
+## 3.12 Reporting Open Item Resolution
+
+The following item was confirmed resolved through retrospective review of the specification version history. Functional Requirements: Reporting v1.1 formally closes this item.
+
+| **Item** | **Resolution** |
+| --- | --- |
+| OI-RPT-01 — Report definition authoring UI — UX specification amendment required | UX and UI Specification v1.4 was issued incorporating the full interaction design for the report definition authoring surface (Section 7.6): Report Definition Management screen, Report Definition Editor screen with two-panel column selection, drag-to-reorder, Default Visible toggles, Save/Publish/Unpublish/Delete flows, unsaved change warning, and access control enforcement. Section 7.2 updated with Draft badge and 'Manage Reports' button. Acceptance criteria AC-UP-RPT-AUTH-01 through AC-UP-RPT-AUTH-18 added. Blocking qualifier superseded. |
+
+# 4. Document Library
+
+| **Document** | **Version** | **Status** | **Notes** |
+| --- | --- | --- | --- |
+| Functional Requirements: Reporting | v1.1 | Complete | OI-RPT-01 closed. Full report definition authoring surface interaction design incorporated via UX and UI Specification v1.5 Section 7.6. Depends-on references updated to current versions. |
+
+Recommended reading order for new sessions:
+
+- Project Context Handoff v2.4 — this document.
+
+- System Context and Domain Glossary v1.11 — authoritative terminology.
+
+- Application Architecture Specification v3.6 — the binding technical envelope (Azure-only: PostgreSQL Flexible Server, App Service, Azure Functions).
+
+- Security and Access Control Specification v1.4 — capability flag model, cost center permission framework.
+
+- UX and UI Specification v1.5 — navigation model, all modules, notification bell, report authoring.
+
+- Data Integration Specification v1.6 — file format contracts, ingestion pipeline, PostgreSQL schemas.
+
+- In-Application Notification Mechanism Specification v1.1 — notification delivery model.
+
+- Functional Requirements: Budget Planning v1.1.
+
+- Functional Requirements: Workforce Planning v1.1.
+
+- Functional Requirements: Reporting v1.1.
+
+- Functional Requirements: Finance Approval Workflow v1.2.
+
+# 5. Open Questions
+
+*All open questions from Sections 2.1 through 3.11 of v2.2 remain resolved as recorded. The following item is added and closed in this amendment.*
+
+| **OI-RPT-01 — Report definition authoring UI — UX specification amendment required — RESOLVED**** RESOLVED in v2.3. UX and UI Specification v1.4 was issued incorporating the full interaction design for the report definition authoring surface into Section 7.6. All minimum requirements stated in Functional Requirements: Reporting v1.0 Section 5 are now covered by the UX specification: authoring layout, column selection interaction (two-panel with search), default visibility controls (MUI Switch toggles), publish/unpublish flow (confirmation modals), and draft vs. published state display in the Report List (Draft amber MUI Chip badge). Acceptance criteria AC-UP-RPT-AUTH-01 through AC-UP-RPT-AUTH-18 added to UX spec. Functional Requirements: Reporting v1.1 formally closes this item.** |
+| --- |
+
+All open questions across all specifications are now resolved.
+
+# 6. Terminology Notes
+
+*All terminology in this document and in all OBS specifications matches the System Context and Domain Glossary v1.11 exactly. Do not introduce synonyms or assume meanings not defined in the glossary.*
+
+# 7. Next Steps
+
+All specification-blocking items and all open items are resolved. No outstanding items remain across any specification. The system is ready for implementation.
+
+| **No remaining open items. All specifications are complete and all decisions are recorded. Implementation may proceed across all modules.** |
+| --- |
+
+# 8. Document Control
+
+| **Version** | **Date** | **Author** | **Change Summary** |
+| --- | --- | --- | --- |
+| 1.8 | Draft | TBD | Records completion of Notification Mechanism Specification v1.0 and all four companion amendments. OI-WP-03 and OI-FAW-01 closed. Notification mechanism decisions added. |
+| 1.9 | Draft | TBD | Records completion of UX and UI Specification v1.4 which resolves OI-RPT-01. Section 1.1 updated. Section 3.8 Report Definition Authoring decisions added. Section 5 OI-RPT-01 closed. Section 7 updated. |
+| 2.0 | Draft | TBD | Records resolution of all five Data Integration open items (OI-DI-02 through -07 except -06). Section 1.1 updated. Section 3.9 added. Section 4 and 5 updated. Section 7 cleared. |
+| 2.1 | Draft | TBD | Records resolution of all three Budget Planning open items (OI-BP-01, -02, -03). Section 1.1 updated: Budget Planning v1.1 complete. Section 3.10 added. Section 4 and 5 updated. |
+| 2.2 | Draft | TBD | Records resolution of Finance Approval Workflow open item OI-FAW-01. Section 1.1 updated: Finance Approval Workflow v1.2 complete. Section 3.11 added. Section 4 and 5 updated. |
+| 2.3 | Draft | TBD | Records resolution of Reporting open item OI-RPT-01 following retrospective review of specification version history. Section 1.1 updated: Reporting v1.1 complete; all open items resolved across all functional requirements specifications. Section 3.12 Reporting resolution added (one item). Section 4 document library: Reporting v1.1 recorded. Section 5 OI-RPT-01 closed with resolution. Section 7 next steps confirmed: no remaining open items across any specification. Section 8 v2.3 row added. |
+| 2.4 | Draft | Claude | Databricks-free platform cascade aligned to Architecture Spec v3.6. Section 1.1 architecture status updated to v3.6 and to the Azure-only platform summary (PostgreSQL Flexible Server, App Service, Azure Functions). Document-library and related-document version references updated for the cascade: Architecture v3.6, Security v1.4, UX/UI v1.5, Data Integration v1.6 (Delta Lake schemas → PostgreSQL schemas), Notification Mechanism v1.1, Workforce Planning v1.1. The Databricks-based Azure migration specification is withdrawn; the canonical migration specification is OBS_Azure_Cloud_Migration_Specification_v2_0. |
+| 2.4 (errata) | Draft | Claude | Version-reference corrections per Specification Consistency & Errata Report v1.0 (in-place errata; no technical content changed). Active references in the depends-on header, relationship/related-documents lists, and instructional cross-references updated to current versions: System Context and Domain Glossary v1.9 → v1.11; Functional Requirements: Workforce Planning v1.0 → v1.1; Data Integration Specification v1.5 → v1.6; In-Application Notification Mechanism Specification v1.0 → v1.1; Security and Access Control Specification v1.3 → v1.4; UX and UI Specification v1.4 → v1.5; Project Context Handoff v2.3 → v2.4 (as applicable to this document). Additionally (ERR-09 class): the top-of-document amendment banner, which described a stale "v2.2 → v2.3" amendment, was rewritten to describe the actual v2.3 → v2.4 change; the §1.1 "Notification mechanism status" line was corrected from v1.0 to v1.1; and the §4 document-library Reporting row pointer was corrected from UX and UI Specification v1.4 to v1.5. Historical Document Control rows and open-item resolution narratives describing past events are unchanged. |
+
+## Related Documents
+
+- OPEX Budgeting System — System Context and Domain Glossary v1.11
+
+- OPEX Budgeting System — Application Architecture Specification v3.6
+
+- OPEX Budgeting System — Security and Access Control Specification v1.4
+
+- OPEX Budgeting System — UX and UI Specification v1.5
+
+- OPEX Budgeting System — Data Integration Specification v1.6
+
+- OPEX Budgeting System — In-Application Notification Mechanism Specification v1.1
+
+- OPEX Budgeting System — Functional Requirements: Budget Planning v1.1
+
+- OPEX Budgeting System — Functional Requirements: Workforce Planning v1.1
+
+- OPEX Budgeting System — Functional Requirements: Reporting v1.1
+
+- OPEX Budgeting System — Functional Requirements: Finance Approval Workflow v1.2
+
+OBS_Project_Context_Handoff_v2_3.docx
+
+Page  of

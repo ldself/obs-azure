@@ -1,0 +1,399 @@
+OPEX Budgeting System  —  Local Development Environment Specification  —  v1.1 Draft**	CONFIDENTIAL | DRAFT**
+
+**OPEX Budgeting System**
+
+**Local Development Environment Specification**
+
+Version 1.1 — Draft · OBS_Local_Dev_Environment_Spec_v1_1.docx
+
+| **Document title** | **Local Development Environment Specification** |
+| --- | --- |
+| **System** | OPEX Budgeting System (OBS) |
+| **Version** | 1.1 — Draft |
+| **Status** | For Review |
+| **Platform** | macOS (Apple Silicon and Intel) |
+| **Depends on** | Application Architecture Specification v3.6 · Security and Access Control Specification v1.4 · Build Sequencing Plan v1.1 · Project Context Handoff v2.4 |
+
+# 1. Purpose
+
+This document specifies the local development environment for the OPEX Budgeting System (OBS) on macOS. It defines the required toolchain, the local substitutes for cloud services (Azure PostgreSQL Flexible Server, Azure Blob Storage, Microsoft Entra ID), the repository structure, the process for running the full stack locally, and the local testing strategy. It is intended for consumption by Claude Code and any developer working on the OBS implementation.
+
+This specification supplements the Build Sequencing Plan v1.1. Every phase in that plan must be buildable, runnable, and testable using the local environment defined here, without requiring a live connection to Azure, PostgreSQL Flexible Server, or Microsoft Entra ID.
+
+# 2. Local Environment Design Decisions
+
+| **Decision** | **Choice** | **Rationale** |
+| --- | --- | --- |
+| **PostgreSQL substitute** | DuckDB (local file-based) | DuckDB supports SQL, is embeddable in Python, and requires no server process. It is a self-contained analogue to Azure PostgreSQL Flexible Server for development purposes. All obs.* table schemas are mirrored exactly. |
+| **Entra ID substitute** | Local mock auth middleware | A dev-only FastAPI middleware injects a configurable test user identity, bypassing all OIDC/OAuth flows. The middleware is activated by environment variable LOCAL_AUTH_BYPASS=true and must never be enabled outside the local environment. |
+| **Azure Blob Storage substitute** | Local filesystem directory | A designated local directory (/local-data/landing-zone/) substitutes for the Azure Blob Storage landing zone. The ingestion pipeline detects its target path via environment variable and works identically against the local directory. |
+| **Azure Functions substitute** | Python scripts invoked manually or via Makefile | Ingestion pipeline jobs are plain Python scripts that can be run manually or via make commands. No host-specific runtime dependencies exist in the pipeline code per the hosting-agnostic requirement. |
+| **Microsoft Teams / Email alerts** | Console log only (local) | Pipeline alert notifications print to the console in local mode. The notification channel is toggled by environment variable ALERT_CHANNEL=console│teams│email. |
+| **Frontend proxy** | Vite dev server proxy | The Vite development server proxies /api/* requests to the local FastAPI instance, eliminating CORS issues during local development. |
+| **Secret management** | Local .env files (git-ignored) | Azure Key Vault is not used locally. All secrets and configuration values are stored in .env files that are explicitly excluded from version control. |
+
+# 3. Prerequisites — macOS Toolchain
+
+Install the following tools before beginning. All version constraints are minimums unless a specific version is required.
+
+## 3.1 Core Runtime Dependencies
+
+| **Tool** | **Minimum Version** | **Installation** |
+| --- | --- | --- |
+| **Homebrew** | Latest | https://brew.sh — macOS package manager. Install first; all other tools are installed via Homebrew or it manages their version managers. |
+| **Python** | 3.11 | brew install pyenv, then pyenv install 3.11 and pyenv global 3.11. Do not use the macOS system Python. |
+| **Node.js** | 20 LTS | brew install nvm, then nvm install 20 and nvm use 20. Do not use a globally installed Node.js. |
+| **Git** | 2.40 | brew install git |
+
+## 3.2 VS Code and Extensions
+
+Install Visual Studio Code from https://code.visualstudio.com. The following extensions are required for this project:
+
+| **Extension** | **Extension ID** | **Purpose** |
+| --- | --- | --- |
+| **Python** | ms-python.python | Python language support, linting, debugging |
+| **Pylance** | ms-python.vscode-pylance | Python type checking and IntelliSense |
+| **Ruff** | charliermarsh.ruff | Python linter and formatter (replaces Flake8 + Black) |
+| **ESLint** | dbaeumer.vscode-eslint | TypeScript/React linting |
+| **Prettier** | esbenp.prettier-vscode | TypeScript/React formatting |
+| **DuckDB SQL Tools** | evidence-dev.duckdb | Query local DuckDB databases directly in VS Code |
+| **REST Client** | humao.rest-client | Test API endpoints via .http files in VS Code |
+| **GitLens** | eamodio.gitlens | Enhanced Git history and blame |
+| **Docker** | ms-azuretools.vscode-docker | Optional — for containerised local testing |
+| **EditorConfig** | editorconfig.editorconfig | Enforce consistent editor settings across the team |
+
+| **Note: ****A .vscode/extensions.json file in the repository root will prompt VS Code to recommend these extensions automatically when the project is opened.** |
+| --- |
+
+## 3.3 Python Package Management
+
+The backend API uses a Python virtual environment. Do not install Python packages globally.
+
+| **# From the repository root python -m venv .venv source .venv/bin/activate pip install -r backend/requirements.txt pip install -r backend/requirements-dev.txt** |
+| --- |
+
+requirements.txt includes the production dependencies. requirements-dev.txt adds local-only dependencies:
+
+| **Package** | **Version** | **Purpose** |
+| --- | --- | --- |
+| **fastapi** | >=0.111 | API framework |
+| **uvicorn** | >=0.29 | ASGI server for local FastAPI execution |
+| **duckdb** | >=0.10 | Local PostgreSQL substitute |
+| **pandas** | >=2.0 | Data manipulation in ingestion pipeline |
+| **openpyxl** | >=3.1 | Excel export and file parsing |
+| **python-dotenv** | >=1.0 | Load .env files for local configuration |
+| **httpx** | >=0.27 | HTTP client for API integration tests |
+| **pytest** | >=8.0 | Test runner (dev only) |
+| **pytest-asyncio** | >=0.23 | Async test support for FastAPI endpoints (dev only) |
+| **ruff** | >=0.4 | Linter and formatter (dev only) |
+| **mypy** | >=1.10 | Static type checking (dev only) |
+
+## 3.4 Node Package Management
+
+The frontend uses npm. Run all npm commands from the frontend/ directory.
+
+| **cd frontend npm install** |
+| --- |
+
+# 4. Repository Structure
+
+The repository is a monorepo containing the backend API, frontend SPA, ingestion pipeline, database schema bootstrap, and local development tooling.
+
+| **obs/ ├── backend/                     # FastAPI application │   ├── app/ │   │   ├── main.py              # FastAPI app entry point │   │   ├── auth/                # Auth middleware (Entra ID + local bypass) │   │   ├── routers/             # API route modules (one per domain) │   │   ├── services/            # Business logic and calculation service │   │   │   ├── calculation_service.py │   │   │   └── notification_service.py │   │   ├── db/                  # Database access layer (DuckDB local / PostgreSQL prod) │   │   └── models/              # Pydantic request/response models │   ├── pipeline/                # Ingestion pipeline scripts │   │   ├── actuals_pipeline.py │   │   ├── employees_pipeline.py │   │   └── hierarchy_pipeline.py │   ├── tests/ │   │   ├── unit/ │   │   ├── integration/ │   │   └── fixtures/            # Sample CSV/Excel files for pipeline tests │   ├── requirements.txt │   └── requirements-dev.txt ├── frontend/                    # React TypeScript SPA │   ├── src/ │   │   ├── components/          # All React components (mirroring UX spec sections) │   │   ├── contexts/            # React contexts (ObsUserContext, BudgetWorkflowContext) │   │   ├── hooks/               # Custom hooks │   │   ├── services/            # API client functions │   │   └── types/               # TypeScript type definitions │   ├── public/ │   ├── vite.config.ts │   ├── tsconfig.json │   └── package.json ├── schema/                      # PostgreSQL / DuckDB schema definitions │   ├── bootstrap.sql            # CREATE TABLE statements for all obs.* tables │   └── seed/                    # Seed data scripts for local development ├── local-data/                  # Git-ignored local data directory │   ├── landing-zone/            # Substitute for Azure Blob Storage landing zone │   │   ├── actuals/ │   │   ├── employees/ │   │   └── hierarchies/ │   ├── archive/ │   ├── error/ │   └── obs.duckdb               # Local DuckDB database file ├── .vscode/ │   ├── extensions.json          # Recommended extensions │   ├── settings.json            # Workspace settings │   └── launch.json              # Debug configurations ├── .env.local.example           # Template for local environment variables ├── .gitignore ├── Makefile                     # Developer convenience commands └── README.md** |
+| --- |
+
+| **Critical: ****.env.local, local-data/, and obs.duckdb must be listed in .gitignore. These files must never be committed to version control.** |
+| --- |
+
+# 5. Environment Variables
+
+Copy .env.local.example to .env.local and populate the values. The .env.local file is loaded by python-dotenv in the backend and by Vite in the frontend. Never commit .env.local.
+
+## 5.1 Backend Environment Variables (.env.local)
+
+| **Variable** | **Local Value** | **Purpose** |
+| --- | --- | --- |
+| **LOCAL_AUTH_BYPASS** | true | Activates the mock auth middleware. Must be false or absent in all non-local environments. |
+| **LOCAL_AUTH_USER_ID** | dev-admin-001 | The user_id injected by the mock auth middleware. Must match a record in obs.users. |
+| **LOCAL_AUTH_USER_EMAIL** | admin@obs.local | The email injected by the mock auth middleware. |
+| **LOCAL_AUTH_USER_NAME** | Local Admin | The display name injected by the mock auth middleware. |
+| **DB_ENGINE** | duckdb | Selects the database engine. duckdb for local; postgresql for production. |
+| **DUCKDB_PATH** | ./local-data/obs.duckdb | Path to the local DuckDB database file. |
+| **LANDING_ZONE_PATH** | ./local-data/landing-zone | Local filesystem path substituting for Azure Blob Storage landing zone. |
+| **ARCHIVE_PATH** | ./local-data/archive | Local filesystem path for processed files. |
+| **ERROR_PATH** | ./local-data/error | Local filesystem path for rejected files. |
+| **ALERT_CHANNEL** | console | Pipeline alert channel. console for local; teams or email for production. |
+| **NOTIFICATION_POLL_INTERVAL_SECONDS** | 60 | Notification polling interval in seconds. |
+| **CORS_ALLOWED_ORIGINS** | http://localhost:5173 | Allowed CORS origins. Matches Vite default dev server port. |
+| **LOG_LEVEL** | DEBUG | Application log level. |
+
+## 5.2 Frontend Environment Variables (.env.local in frontend/)
+
+| **Variable** | **Local Value** | **Purpose** |
+| --- | --- | --- |
+| **VITE_API_BASE_URL** | http://localhost:8000 | Base URL for the backend API. The Vite proxy rewrites /api/* to this value. |
+| **VITE_AUTH_ENABLED** | false | When false, the frontend skips the Entra ID OIDC login flow and treats the session as authenticated. Matches LOCAL_AUTH_BYPASS on the backend. |
+
+# 6. Local Authentication Bypass
+
+Because Microsoft Entra ID requires a live tenant and registered application, the local environment uses a mock authentication middleware that short-circuits the entire OIDC/OAuth flow.
+
+## 6.1 Backend Mock Auth Middleware
+
+When LOCAL_AUTH_BYPASS=true, the FastAPI dependency that normally validates an Entra ID JWT token is replaced by a function that reads the LOCAL_AUTH_USER_* environment variables and returns a synthetic CurrentUser object. The rest of the authorization pipeline — capability flag checks, cost center grant checks, confidential data enforcement — operates identically, because it receives the same CurrentUser type regardless of how the user was authenticated.
+
+| **# backend/app/auth/middleware.py (excerpt) def get_current_user() -****>**** CurrentUser:     if settings.LOCAL_AUTH_BYPASS:         return CurrentUser(             user_id=settings.LOCAL_AUTH_USER_ID,             email=settings.LOCAL_AUTH_USER_EMAIL,             display_name=settings.LOCAL_AUTH_USER_NAME,         )     # ... real Entra ID JWT validation ...** |
+| --- |
+
+| **Security: ****LOCAL_AUTH_BYPASS must be implemented as a hard check against the environment variable — it must not be togglable via an API call or a request header. A startup assertion must raise an error if LOCAL_AUTH_BYPASS=true and the application is not running on localhost.** |
+| --- |
+
+## 6.2 Frontend Auth Bypass
+
+When VITE_AUTH_ENABLED=false, the frontend AuthContext skips the MSAL/OIDC redirect and immediately sets the session state to authenticated. No token is present in memory; API requests are made without an Authorization header. The backend mock middleware accepts requests with no Authorization header when LOCAL_AUTH_BYPASS=true.
+
+## 6.3 Test Users
+
+The schema seed scripts (schema/seed/) populate obs.users with the following pre-configured local test users. Use LOCAL_AUTH_USER_ID to switch between them during development.
+
+| **user_id** | **Role / Grants** | **Purpose** |
+| --- | --- | --- |
+| **dev-admin-001** | is_administrator = TRUE | Full system access. Default local user. |
+| **dev-costcenter-001** | ALL_WRITE standard grant + ALL_WRITE confidential on CC-1001 | Test cost center owner with confidential access. |
+| **dev-readonly-001** | ALL_READ standard grant on CC-1001, ALL_NONE confidential | Test read-only user without confidential access. |
+| **dev-finance-001** | is_finance_reviewer = TRUE, ALL_READ on CC-1001 | Test Finance Reviewer. |
+| **dev-modeler-001** | is_system_modeler = TRUE | Test System Modeler. |
+| **dev-reportdev-001** | is_report_developer = TRUE | Test Report Developer. |
+
+# 7. Local Database — DuckDB
+
+DuckDB serves as the local substitute for Azure PostgreSQL Flexible Server. All obs.* table schemas are defined in schema/bootstrap.sql and match the schemas specified across all OBS specifications exactly. Column names, data types, and constraints are identical to the PostgreSQL production schemas.
+
+## 7.1 Database Abstraction Layer
+
+The backend database access layer (backend/app/db/) uses an environment-switchable engine. When DB_ENGINE=duckdb, all queries execute against the local DuckDB file. When DB_ENGINE=postgresql, queries execute against Azure PostgreSQL Flexible Server via a direct PostgreSQL connection. No query logic changes between environments — only the connection object differs.
+
+| **# backend/app/db/engine.py (excerpt) def get_connection():     if settings.DB_ENGINE == ****'****duckdb****'****:         return duckdb.connect(settings.DUCKDB_PATH)     elif settings.DB_ENGINE == ****'****postgresql****'****:         return psycopg2.connect(settings.PG_CONNECTION_STRING)  # production only** |
+| --- |
+
+## 7.2 Schema Bootstrap
+
+Run the following command to create all obs.* tables in the local DuckDB database. This is idempotent — it uses CREATE TABLE IF NOT EXISTS throughout and is safe to run multiple times.
+
+| **make db-bootstrap # or directly: python -c ****"****import duckdb; conn = duckdb.connect(****'****./local-data/obs.duckdb****'****); conn.executemany(open(****'****schema/bootstrap.sql****'****).read()[:1])****"**** # Recommended: use the Makefile target which handles multi-statement execution correctly.** |
+| --- |
+
+## 7.3 Seed Data
+
+After bootstrapping, load seed data to make the system immediately usable for development. Seed scripts are in schema/seed/ and are applied in dependency order by make db-seed.
+
+| **Seed Script** | **Data Loaded** | **Required For** |
+| --- | --- | --- |
+| **01_users.sql** | Test users (Section 6.3) into obs.users | Phase 1 onwards |
+| **02_cost_center_hierarchy.sql** | Sample cost center hierarchy (3 levels, ~10 cost centers) into obs.cost_center_hierarchy_nodes | Phase 2 onwards |
+| **03_account_hierarchy.sql** | Sample account hierarchy (expense accounts) into obs.expense_accounts and obs.account_hierarchy_nodes | Phase 2 onwards |
+| **04_user_grants.sql** | Cost center grant assignments for test users into obs.user_cost_center_grants | Phase 1 onwards |
+| **05_business_rules.sql** | Sample merit increase rate, burden rates, component mappings, overhead rates for the current fiscal year | Phase 3 onwards |
+| **06_budget_versions.sql** | One draft budget version for the current fiscal year | Phase 5 onwards |
+| **07_actuals.sql** | Sample actuals records for the current fiscal year YTD | Phase 2 onwards |
+
+| **make db-seed # Applies all seed scripts in order against ./local-data/obs.duckdb** |
+| --- |
+
+## 7.4 DuckDB / PostgreSQL Compatibility Notes
+
+DuckDB does not implement PostgreSQL B-tree / partial index tuning or PostgreSQL INSERT … ON CONFLICT DO UPDATE semantics natively. The following adaptations apply in the local environment only:
+
+- PostgreSQL INSERT … ON CONFLICT DO UPDATE upserts are implemented as DELETE + INSERT pairs in DuckDB. The db/ abstraction layer provides a merge() helper that branches on DB_ENGINE.
+
+- Append-only enforcement for the audit log is enforced in application code (no UPDATE or DELETE calls to obs.audit_log) rather than by the storage engine. An integration test verifies this.
+
+- PostgreSQL index definitions are not applied in DuckDB — no action required locally.
+
+- PostgreSQL retention policies are not applicable locally — the DuckDB file is the complete database.
+
+# 8. Running the Full Stack Locally
+
+The Makefile provides all commands needed to run the full stack. Three terminal sessions are required: one for the backend API, one for the frontend dev server, and optionally one for running pipeline scripts.
+
+## 8.1 First-Time Setup
+
+Run this sequence once after cloning the repository:
+
+| **# 1. Install Python dependencies python -m venv .venv ****&****&**** source .venv/bin/activate pip install -r backend/requirements.txt -r backend/requirements-dev.txt # 2. Install Node dependencies cd frontend ****&****&**** npm install ****&****&**** cd .. # 3. Copy and configure environment variables cp .env.local.example .env.local cp frontend/.env.local.example frontend/.env.local # Edit both files as needed — defaults work for most local development # 4. Create local data directories make dirs # Creates: local-data/{landing-zone/actuals,landing-zone/employees, #           landing-zone/hierarchies,archive,error} # 5. Bootstrap the database and load seed data make db-bootstrap make db-seed** |
+| --- |
+
+## 8.2 Starting the Backend API
+
+Open a terminal, activate the virtual environment, and run:
+
+| **source .venv/bin/activate make api # or directly: uvicorn backend.app.main:app --reload --port 8000 # API is available at: http://localhost:8000 # Interactive docs at: http://localhost:8000/docs  (Swagger UI) # Health check:        http://localhost:8000/health** |
+| --- |
+
+## 8.3 Starting the Frontend Dev Server
+
+Open a second terminal and run:
+
+| **cd frontend npm run dev # SPA is available at: http://localhost:5173 # API calls to /api/* are proxied to http://localhost:8000** |
+| --- |
+
+## 8.4 Vite Proxy Configuration
+
+The vite.config.ts file proxies all /api/* requests to the local backend, eliminating CORS issues during development:
+
+| **// frontend/vite.config.ts export default defineConfig({   server: {     proxy: {       ****'****/api****'****: {         target: ****'****http://localhost:8000****'****,         changeOrigin: true,       }     }   } })** |
+| --- |
+
+## 8.5 Makefile Reference
+
+| **Command** | **Action** | **Notes** |
+| --- | --- | --- |
+| **make api** | Start the FastAPI dev server with --reload | Requires .venv to be activated |
+| **make frontend** | Start the Vite frontend dev server |  |
+| **make db-bootstrap** | Create all obs.* tables in the local DuckDB file | Idempotent |
+| **make db-seed** | Load all seed data in dependency order | Idempotent |
+| **make db-reset** | Delete obs.duckdb, re-bootstrap, and re-seed | Destructive — wipes all local data |
+| **make dirs** | Create local-data/ directory structure | Safe to run multiple times |
+| **make pipeline-actuals FILE=path** | Run the actuals ingestion pipeline against a local file | Drops file into landing-zone and processes it |
+| **make pipeline-employees FILE=path** | Run the employee ingestion pipeline against a local file |  |
+| **make pipeline-hierarchy FILE=path** | Run the hierarchy ingestion pipeline against a local file |  |
+| **make test** | Run all backend tests (pytest) |  |
+| **make test-unit** | Run unit tests only |  |
+| **make test-integration** | Run integration tests only | Requires a running local API |
+| **make lint** | Run ruff (Python) and eslint (TypeScript) |  |
+| **make typecheck** | Run mypy (Python) and tsc --noEmit (TypeScript) |  |
+
+# 9. VS Code Debug Configurations
+
+The .vscode/launch.json file provides the following debug configurations. Select them from the VS Code Run and Debug panel (Cmd+Shift+D).
+
+| **Configuration Name** | **What It Launches** | **Notes** |
+| --- | --- | --- |
+| **OBS: FastAPI (Backend)** | uvicorn with --reload, attached to VS Code debugger | Set breakpoints in any backend Python file. The --reload flag is disabled when the debugger is attached to avoid process restart conflicts. |
+| **OBS: Pytest (All Tests)** | pytest for all tests in backend/tests/ | Run from VS Code without opening a terminal. |
+| **OBS: Pytest (Current File)** | pytest for the currently open test file | Useful for focused test runs during development. |
+| **OBS: Pipeline — Actuals** | actuals_pipeline.py with a sample fixture file as input | Runs the actuals ingestion pipeline in debug mode against the fixture in backend/tests/fixtures/. |
+| **OBS: Pipeline — Employees** | employees_pipeline.py with a sample fixture file as input |  |
+| **OBS: Pipeline — Hierarchy** | hierarchy_pipeline.py with a sample fixture file as input |  |
+
+The frontend (React/TypeScript) is debugged directly in Chrome or Edge using the browser's built-in DevTools. Source maps are enabled by Vite in development mode. No separate VS Code launch configuration is required for the frontend.
+
+# 10. Local Testing Strategy
+
+Three testing layers are defined. All three must pass before any phase is considered complete.
+
+## 10.1 Unit Tests (backend/tests/unit/)
+
+Unit tests cover individual functions and classes in isolation. External dependencies (database, filesystem, notification service) are mocked using pytest fixtures and Python's unittest.mock. Unit tests must run without any running services — no local API, no DuckDB file required.
+
+Coverage targets per module:
+
+- Calculation service (calculation_service.py): 100% line coverage. Every compensation calculation rule, proration logic, merit increase application, burden rate, and AIPEIP bonus rule must have a dedicated unit test.
+
+- Ingestion pipeline validation rules: 100% line coverage of all structural and referential integrity validation logic.
+
+- Auth middleware: 100% line coverage of the mock bypass path and the token validation path (token validation mocked).
+
+- All other service modules: minimum 80% line coverage.
+
+| **# Run all unit tests make test-unit # or: pytest backend/tests/unit/ -v # Run with coverage report pytest backend/tests/unit/ --cov=backend/app --cov-report=term-missing** |
+| --- |
+
+## 10.2 Integration Tests (backend/tests/integration/)
+
+Integration tests exercise the full API request/response cycle against a live local backend and local DuckDB database. Each test starts from a known database state (via fixtures that reset and re-seed the database), makes real HTTP requests to the running API using the httpx test client, and asserts on the HTTP response and the resulting database state.
+
+Integration tests cover:
+
+- Every API endpoint: correct HTTP status codes for valid requests; correct 401/403/404/409/422 responses for invalid requests.
+
+- Authorization enforcement: capability flag checks, cost center grant checks, confidential data field exclusion — verified for each relevant endpoint using each test user identity (Section 6.3).
+
+- Audit log writes: every mutation operation generates the correct audit event with the correct fields — verified by querying obs.audit_log after the API call.
+
+- Calculation correctness: end-to-end calculation results verified at the API response level (not just unit-tested in isolation).
+
+- Ingestion pipeline: pipeline scripts invoked against fixture CSV/Excel files; resulting obs.* table state asserted.
+
+| **# Integration tests require the local API to be running # Terminal 1: make api # Terminal 2: make test-integration # or: pytest backend/tests/integration/ -v** |
+| --- |
+
+| **Note: ****Integration tests use a separate DuckDB file (local-data/obs-test.duckdb) that is bootstrapped and seeded fresh for each test session. The development database (local-data/obs.duckdb) is never modified by test runs.** |
+| --- |
+
+## 10.3 Frontend-Only Testing (API Mocked)
+
+The frontend can be run against a fully mocked API using MSW (Mock Service Worker). This allows frontend development and testing to proceed independently of backend completeness, and allows UI acceptance criteria to be verified without a running backend.
+
+MSW intercepts all /api/* requests in the browser and returns pre-defined mock responses defined in frontend/src/mocks/handlers.ts. MSW is activated by setting VITE_API_MOCK=true in frontend/.env.local.
+
+| **# frontend/.env.local VITE_API_MOCK=true # Then start the frontend as normal cd frontend ****&****&**** npm run dev # All API calls are intercepted by MSW — no backend required** |
+| --- |
+
+MSW mock handlers must be kept in sync with the API contract. For each API endpoint defined in the specifications, a corresponding MSW handler must exist. Mock responses must use realistic data matching the obs.* schemas.
+
+## 10.4 Acceptance Criteria Verification
+
+Every AC-* identifier from the specifications must be mapped to a test. The mapping is maintained in a test registry file (backend/tests/ac_registry.yaml) that lists each AC-* identifier, the test file, and the test function that covers it. Claude Code must update this file as tests are written.
+
+| **# backend/tests/ac_registry.yaml (excerpt) AC-CAP-01:   file: integration/test_auth.py   test: test_administrator_has_full_access AC-CAP-02:   file: integration/test_auth.py   test: test_non_admin_cannot_grant_admin_flag # ...** |
+| --- |
+
+| **# Verify all AC-***** identifiers have a registered test make ac-coverage # Exits non-zero if any AC-***** identifier is unmapped** |
+| --- |
+
+# 11. Testing the Ingestion Pipeline Locally
+
+The ingestion pipeline scripts run as plain Python — no Azure Functions runtime is required locally. The landing zone path and database path are controlled by environment variables.
+
+## 11.1 Using Fixture Files
+
+Sample CSV and Excel fixture files are provided in backend/tests/fixtures/. These files conform exactly to the file format contracts in the Data Integration Specification v1.6 and cover the following cases:
+
+- Valid actuals file: correct structure, all required fields, USD currency, all cost centers and accounts matching seed data.
+
+- Actuals file with quarantine cases: rows with unknown cost center codes, unknown account codes, non-USD currency records.
+
+- Actuals file with high error rate: more than 80% invalid rows — causes file-level rejection.
+
+- Valid employee file: correct structure, all required fields, salary_structure values covering AIPEIP-eligible and ineligible cases.
+
+- Valid cost center hierarchy file: three-level hierarchy matching the seed cost centers.
+
+- Valid account hierarchy file: leaf-level accounts with is_personnel_expense flags set.
+
+- Duplicate file: same content as a previously processed file — verifies idempotency.
+
+## 11.2 Dropping Files into the Landing Zone
+
+| **# Process an actuals fixture file make pipeline-actuals FILE=backend/tests/fixtures/actuals_valid.csv # This copies the file to local-data/landing-zone/actuals/ # and immediately runs actuals_pipeline.py against it. # Verify the result # Open obs.duckdb in VS Code with the DuckDB extension and query: # SELECT COUNT(*****) FROM obs.actuals; # SELECT ***** FROM obs.ingestion_control ORDER BY processed_at DESC LIMIT 5; # SELECT * FROM obs.quarantine ORDER BY quarantined_at DESC LIMIT 10;** |
+| --- |
+
+# 12. Switching Between Test Users During Development
+
+To test the application as a different user, update LOCAL_AUTH_USER_ID in .env.local and restart the backend API. The frontend session context will reflect the new user on the next page load.
+
+| **# .env.local — switch to Finance Reviewer LOCAL_AUTH_USER_ID=dev-finance-001 LOCAL_AUTH_USER_EMAIL=finance@obs.local LOCAL_AUTH_USER_NAME=Local Finance Reviewer # Then restart the backend make api** |
+| --- |
+
+| **Note: ****Changing the test user does not require a database reset. The user records and their grants are already present in the seed data. Only the backend restart is needed.** |
+| --- |
+
+# 13. Impact on Build Sequencing Plan v1.0
+
+The following addition applies to the Build Sequencing Plan v1.0. No existing phase is changed — this specification adds a prerequisite gate that applies before Phase 0 begins.
+
+| **Phase 0 Prerequisite Gate — Local Environment Verified**** Before Phase 0 work begins, the developer must verify the local environment is fully operational: make dirs, make db-bootstrap, and make db-seed complete without errors. make api starts the FastAPI server and GET /health returns HTTP 200. npm run dev starts the Vite frontend without errors. The browser at http://localhost:5173 loads the application shell without authentication errors. make test-unit passes with zero failures.** |
+| --- |
+
+# 14. Document Control
+
+| **Version** | **Status** | **Date** | **Change Summary** |
+| --- | --- | --- | --- |
+| **1.0** | Draft | TBD | Initial version. Specifies macOS local development environment including toolchain, DuckDB local database substitute, mock Entra ID authentication bypass, local filesystem landing zone substitute, repository structure, Makefile commands, VS Code debug configurations, three-layer local testing strategy, ingestion pipeline local testing approach, and pre-Phase 0 environment verification gate. |
+| **1.1** | Draft | Claude | Databricks-free platform cascade aligned to Architecture Spec v3.6. §2 design table updated: the "Delta Lake substitute" row became the "PostgreSQL substitute" row and the "Databricks Workflows substitute" row became the "Azure Functions substitute" row (DuckDB and the Python-script pipeline remain the local stand-ins). DB_ENGINE production value changed from delta to postgresql throughout (§5 environment variables, §7.1). §7 database section reframed against Azure PostgreSQL Flexible Server; §7.1 engine.py excerpt postgresql branch now uses psycopg2; §7.4 retitled "DuckDB / PostgreSQL Compatibility Notes" with body updated to PostgreSQL upsert / index semantics. Depends-on updated to Architecture v3.6, Security v1.4, Build Sequencing Plan v1.1. |
+| **1.1 (errata)** | Draft | Claude | Version-reference corrections per Specification Consistency & Errata Report v1.0 (in-place errata; no technical content changed). Depends-on Project Context Handoff v2.3 → v2.4 (ERR-06) and the §10 testing-fixtures reference Data Integration Specification v1.5 → v1.6 (ERR-04). |
+
+OPEX Budgeting System — Local Development Environment Specification — v1.1 Draft Page
+
+Page  of

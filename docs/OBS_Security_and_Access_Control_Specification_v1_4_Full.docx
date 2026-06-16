@@ -1,0 +1,662 @@
+OPEX Budgeting System  —  Security and Access Control Specification  (v1.4)**	CONFIDENTIAL | DRAFT**
+
+**OPEX Budgeting System**
+
+**Security and Access Control Specification**
+
+*Version 1.4 — Full Restatement*
+
+*OBS_Security_and_Access_Control_Specification_v1_4_Full.docx*
+
+| **Document title** | **Security and Access Control Specification** |
+| --- | --- |
+| **System** | OPEX Budgeting System (OBS) |
+| **Version** | 1.4 — Full Restatement |
+| **Status** | For Review |
+| **Audience** | Development Team, Technical Leads, Project Stakeholders |
+| **Depends on** | OBS Application Architecture Specification v3.6; OBS System Context and Domain Glossary v1.11 |
+
+| ***Full Restatement Notice: This document is a full restatement of the Security and Access Control Specification incorporating all amendments from v1.0 through v1.3. It supersedes all prior versions. All content is present in full — there is no need to consult any prior version file.*** |
+| --- |
+
+# 1. Purpose and Scope
+
+This document defines the security and access control model for the OPEX Budgeting System (OBS). It establishes the authentication architecture, the capability flag model, the permission framework for cost center data access, and the data-scoping rules that govern every interaction between users and the system. All downstream specifications — functional requirements, UI specifications, and code — must conform to the model defined here.
+
+This specification is intended to be consumed directly by development teams and AI-assisted code generation tools. All access control decisions recorded here are binding unless explicitly superseded by a versioned amendment.
+
+## 1.1 Relationship to Other Specifications
+
+This specification depends on and must be read alongside:
+
+- **OBS Application Architecture Specification v3.6** — defines the authentication protocol (OIDC/OAuth 2.0 via Microsoft Entra ID), session management, API security, and audit logging architecture.
+
+- **OBS System Context and Domain Glossary v1.11** — defines all domain terms used herein, including cost center, cost center hierarchy, cost center rollup, position, headcount plan, compensation, actuals, and Finance Reviewer.
+
+This specification must be completed before the following documents can be authored:
+
+- Functional Requirements: Budget Planning
+
+- Functional Requirements: Workforce Planning
+
+- Functional Requirements: Reporting
+
+- Functional Requirements: Finance Approval Workflow
+
+- UX and UI Specification (partially — navigation and screen visibility depend on capability flags)
+
+# 2. Authentication
+
+Authentication for the OBS is fully delegated to Microsoft Entra ID via OpenID Connect (OIDC) and OAuth 2.0. The OBS does not manage usernames, passwords, or credentials of any kind. Every user must authenticate through the corporate Entra ID SSO flow before accessing any part of the application.
+
+Successful authentication at Entra ID is a necessary but not sufficient condition for OBS access. An Administrator must explicitly grant login permission to a user within the OBS before that user can access any OBS functionality. A valid Entra ID account alone does not confer OBS access.
+
+## 2.1 Authentication Protocol
+
+| **Property** | **Value** |
+| --- | --- |
+| Protocol | OpenID Connect (OIDC) with OAuth 2.0 |
+| Identity provider | Microsoft Entra ID (corporate SSO) |
+| Application registration | OBS registered as an OIDC Relying Party in Entra ID |
+| MFA enforcement | Enforced at the Entra ID level — the OBS does not implement MFA independently |
+| Network access | Internet-accessible — MFA enforcement at the IdP is a hard requirement |
+| Unauthenticated access | Not permitted under any circumstances — explicitly out of scope |
+| OBS login permission | Granted explicitly by an Administrator per user — Entra ID authentication alone is insufficient |
+
+## 2.2 Identity Claims
+
+On successful Entra ID authentication, the following claims are used by the OBS:
+
+| **Claim** | **Description** | **OBS Usage** |
+| --- | --- | --- |
+| oid | Entra ID object ID — unique, stable identifier for the user | Primary user identifier in all OBS records and audit log entries |
+| email | Corporate email address | User lookup during provisioning; display purposes |
+| name | Display name | UI display and audit log |
+| groups | Entra ID group membership GUIDs | Not used for OBS access control — all capability and permission assignment is performed within OBS by Administrators |
+
+## 2.3 Login Permission and OBS User Registry
+
+The OBS maintains its own user registry in the PostgreSQL obs schema. Every person who needs OBS access must have a record in this registry created by an Administrator. The registry record controls:
+
+- Whether the user has permission to log in to OBS (is_active flag)
+
+- Whether the user has Administrator capabilities (is_administrator flag)
+
+- Whether the user has System Modeler capabilities (is_system_modeler flag)
+
+- Whether the user has Report Developer capabilities (is_report_developer flag)
+
+- Whether the user has Finance Reviewer capabilities (is_finance_reviewer flag)
+
+- The user's cost center assignments and associated permission grants (stored in related tables — see Section 4)
+
+At login, after Entra ID authenticates the user, the OBS API resolves the user's oid against the registry. If no active registry record exists, the user is denied access with an appropriate message — regardless of their Entra ID authentication status.
+
+## 2.4 Session Management
+
+| **Property** | **Value** |
+| --- | --- |
+| Access token lifetime | 60 minutes |
+| Refresh token lifetime | 8 hours (one working day) |
+| Access token storage | In-memory only — never in localStorage |
+| Refresh token storage | httpOnly secure cookie |
+| Token expiry behavior | 401 triggers silent refresh attempt; if refresh fails, redirect to Entra ID login |
+| Logout | Refresh token revoked; redirect to Entra ID logout endpoint |
+
+| **Claude Code Note — Authentication enforcement** | **Every API endpoint must validate the Entra ID access token on every request. There are no public or unauthenticated endpoints. A missing, expired, or invalid token returns HTTP 401. After token validation, the OBS user registry is checked — a valid token for a user with no active OBS registry record returns HTTP 403. Capability and permission checks follow. Never return 404 to obscure resource existence from an authenticated but unauthorized user — use 403.** |
+| --- | --- |
+
+# 3. Capability Model
+
+The OBS uses a capability flag model rather than a single mutually exclusive role. A user's capabilities are determined by a combination of four boolean flags on their registry record and by their cost center assignments. Flags are independent and additive — a user may hold any combination of the non-Administrator flags simultaneously, in addition to having cost center assignments.
+
+The four capability flags are:
+
+- **is_administrator** — exclusive elevated flag. When true, the user has all system capabilities and all data access. All other flags are redundant for Administrators and are ignored.
+
+- **is_system_modeler** — grants access to system configuration, data model management, and system maintenance functions.
+
+- **is_report_developer** — grants access to create, modify, and publish canned report definitions.
+
+- **is_finance_reviewer** — grants access to review, approve, and reject submitted cost center budgets within the Finance Review module, scoped to the user's assigned cost centers.
+
+Cost center access is not a flag — it is conferred by cost center assignments and their associated permission grants, as defined in Section 4. A user with no capability flags set and no cost center assignments has no OBS access beyond a login-denied message.
+
+| **Claude Code Note — Capability flag storage (obs.users)** | **obs.users columns relevant to capability:   is_active            BOOLEAN NOT NULL DEFAULT FALSE   is_administrator     BOOLEAN NOT NULL DEFAULT FALSE   is_system_modeler    BOOLEAN NOT NULL DEFAULT FALSE   is_report_developer  BOOLEAN NOT NULL DEFAULT FALSE   is_finance_reviewer  BOOLEAN NOT NULL DEFAULT FALSE All flags default to FALSE on record creation. An Administrator must explicitly set each flag. When is_administrator is TRUE, all other flags are stored but ignored at authorization time — the Administrator****'****s implied capabilities supersede them. Always evaluate is_administrator first; if TRUE, grant full access without reading other flags.** |
+| --- | --- |
+
+## 3.1 Administrator
+
+A user with is_administrator = TRUE has unrestricted access to every capability and every piece of data in the OBS. The Administrator flag is exclusive in the sense that it makes all other flags and cost center grants redundant — an Administrator does not need cost center assignments to access cost center data.
+
+| **Capability area** | **Access** |
+| --- | --- |
+| Login permission grant | Grant or deny OBS login permission to any Entra ID user |
+| Capability flag assignment | Set is_administrator, is_system_modeler, is_report_developer, is_finance_reviewer for any user |
+| Cost center assignment | Assign cost centers and permission grants to any user |
+| Budget data | Read and write across all cost centers — no assignment required |
+| Workforce planning data | Read and write across all cost centers — no assignment required |
+| Confidential data (compensation) | Full read and write access — implicit, no explicit grant required |
+| Reporting | Full access to all reports across all cost centers |
+| Report definitions | Create, modify, and publish report definitions |
+| Finance Review | Full access — review, approve, and reject all submitted cost center budgets across all cost centers |
+| Reference data | Full read and write — fiscal calendar, account hierarchy |
+| Business rules configuration | Full read and write in the PostgreSQL obs schema |
+| System configuration | Full access — all system modeler capabilities included |
+| Audit log | Full read access |
+| Batch import monitoring | Full access — monitor, resolve errors, manually trigger |
+| User provisioning | Create registry records, set is_active, assign all flags and grants |
+
+At least one active Administrator must exist in the OBS at all times. The system must prevent the last active Administrator from being deactivated or having their is_administrator flag removed.
+
+## 3.2 System Modeler
+
+A user with is_system_modeler = TRUE has access to system configuration, data model management, business rules configuration, and system maintenance functions. System Modelers do not have write access to budget lines or workforce planning records for any cost center by virtue of this flag alone — such access requires cost center assignments with appropriate grants (Section 4).
+
+| **Capability area** | **Access** |
+| --- | --- |
+| Login permission grant | None — Administrator only |
+| Capability flag assignment | None — Administrator only |
+| Cost center assignment | None — Administrator only |
+| Budget data | No access by default — requires cost center assignment with standard grant |
+| Workforce planning data | No access by default — requires cost center assignment with standard and confidential grants |
+| Confidential data (compensation) | No access by default — requires explicit confidential grant on a cost center assignment |
+| Reporting | Read access to all reports across all cost centers |
+| Report definitions | Read-only — cannot create or publish (requires Report Developer flag) |
+| Finance Review | No access — requires is_finance_reviewer flag or is_administrator |
+| Reference data | Read-only |
+| Business rules configuration | Full read and write in the PostgreSQL obs schema |
+| System configuration | Full access — data model changes, system updates, maintenance |
+| Audit log | Full read access |
+| Batch import monitoring | Full read access — cannot manually trigger (Administrator only) |
+| User provisioning | None — Administrator only |
+
+## 3.3 Report Developer
+
+A user with is_report_developer = TRUE has access to create, modify, and publish canned report definitions within the OBS reporting module. Report Developers can read report data across all cost centers for the purpose of building and testing report definitions. They do not have write access to budget lines or workforce planning records for any cost center by virtue of this flag alone.
+
+| **Capability area** | **Access** |
+| --- | --- |
+| Login permission grant | None — Administrator only |
+| Capability flag assignment | None — Administrator only |
+| Cost center assignment | None — Administrator only |
+| Budget data | No access by default — requires cost center assignment with standard grant |
+| Workforce planning data | No access by default — requires cost center assignment with standard and confidential grants |
+| Confidential data (compensation) | No access by default — requires explicit confidential grant on a cost center assignment |
+| Reporting | Read access to all reports across all cost centers (for report building and testing) |
+| Report definitions | Full access — create, modify, and publish canned report definitions |
+| Finance Review | No access — requires is_finance_reviewer flag or is_administrator |
+| Reference data | Read-only |
+| Business rules configuration | Read-only |
+| System configuration | None — System Modeler or Administrator only |
+| Audit log | Full read access |
+| Batch import monitoring | Read-only view of import job status |
+| User provisioning | None — Administrator only |
+
+## 3.4 Finance Reviewer
+
+A user with is_finance_reviewer = TRUE has access to the Finance Review module and may review, approve, and reject submitted cost center budgets within their assigned cost center scope. The Finance Reviewer flag does not implicitly grant access to any cost center data — cost center assignments (Section 4) must be configured separately to determine which submitted budgets the Finance Reviewer can see and act on.
+
+A Finance Reviewer requires at least ALL_READ standard grant on a cost center assignment to view submitted budget data for that cost center. The approval and rejection actions are gated on the is_finance_reviewer flag (or is_administrator), not on the standard grant level — a Finance Reviewer with ALL_READ can approve or reject regardless of whether they hold ALL_WRITE. ALL_WRITE standard grant must not be assigned to a Finance Reviewer solely for the purpose of enabling approval actions.
+
+| **Capability area** | **Access** |
+| --- | --- |
+| Login permission grant | None — Administrator only |
+| Capability flag assignment | None — Administrator only |
+| Cost center assignment | None — Administrator only |
+| Budget data | Read-only within assigned cost centers (ALL_READ standard grant minimum). No write access to budget lines by virtue of this flag alone. |
+| Workforce planning data | No access by default — requires cost center assignment with standard and confidential grants |
+| Confidential data (compensation) | No access by default — requires explicit confidential grant on a cost center assignment. Approval and rejection actions do not expose compensation data. |
+| Reporting | Read access within assigned cost centers only — not system-wide (no flag-level report access) |
+| Report definitions | None — requires is_report_developer flag or is_administrator |
+| Finance Review — Approval Queue | Access to all submitted cost center budgets within assigned cost center scope |
+| Finance Review — Approve action | Permitted on assigned cost centers (pending status only); mandatory approval reason required |
+| Finance Review — Reject action | Permitted on assigned cost centers (pending status only); mandatory rejection reason required |
+| Finance Review — Bulk Approve action | Permitted on assigned cost centers |
+| Reference data | Read-only |
+| Business rules configuration | None — requires is_system_modeler or is_administrator |
+| System configuration | None — System Modeler or Administrator only |
+| Audit log | None — requires capability flag (is_system_modeler, is_report_developer) or is_administrator |
+| Batch import monitoring | None |
+| User provisioning | None — Administrator only |
+
+The Finance Reviewer capability is fully defined in Functional Requirements: Finance Approval Workflow v1.2 Sections 3 and 7.
+
+## 3.5 Cost Center Access
+
+Cost center access is not a capability flag. It is conferred entirely by cost center assignments and their associated permission grants, as defined in Section 4. Any user — regardless of which capability flags they hold — can be assigned cost centers by an Administrator. The grants on those assignments determine what the user can read and write within those cost centers.
+
+A user with no capability flags and no cost center assignments has no OBS data access. A user with no capability flags but with cost center assignments can read and write data within their assigned cost centers according to their grants — this is the typical profile for a cost center owner or budget entry user. A Finance Reviewer with cost center assignments but no budget entry grants may approve submissions for those cost centers without having write access to the budget lines themselves.
+
+## 3.6 Combined Capability Examples
+
+The following examples illustrate how the additive model works in practice:
+
+| **Example profile** | **is_admin** | **is_system_modeler** | **is_report_developer** | **is_finance_reviewer** | **Effective access** |
+| --- | --- | --- | --- | --- | --- |
+| Administrator | TRUE | — (ignored) | — (ignored) | — (ignored) | Full system access |
+| System Modeler only | FALSE | TRUE | FALSE | FALSE | System config, business rules, audit log read, all report read. No cost center data. No Finance Review access. |
+| Report Developer only | FALSE | FALSE | TRUE | FALSE | Report definition authoring, all report read, audit log read. No cost center data. No Finance Review access. |
+| Finance Reviewer only (no CC assignments) | FALSE | FALSE | FALSE | TRUE | Finance Review module visible. No submitted budgets shown (no cost center scope). No other data access. |
+| Finance Reviewer + cost center assignments | FALSE | FALSE | FALSE | TRUE | Finance Review Approval Queue scoped to assigned cost centers. Read-only budget data per standard grant. Approve and reject actions available. |
+| Finance Reviewer + cost center owner grants | FALSE | FALSE | FALSE | TRUE | All Finance Reviewer access above, plus budget line read/write per ALL_WRITE standard grant on assigned cost centers. |
+| System Modeler + Report Developer | FALSE | TRUE | TRUE | FALSE | All of each flag combined. No cost center data. No Finance Review access. |
+| Report Developer + Finance Reviewer | FALSE | FALSE | TRUE | TRUE | Report definition authoring, all report read, audit log read, Finance Review access within assigned cost centers. |
+| Cost center access only | FALSE | FALSE | FALSE | FALSE | Read/write governed by grants on assigned cost centers only. |
+| Report Developer + cost center access | FALSE | FALSE | TRUE | FALSE | Report authoring + cost center read/write per grants. |
+| System Modeler + cost center access | FALSE | TRUE | FALSE | FALSE | System config + cost center read/write per grants. |
+
+# 4. Permission Framework — Cost Center Access
+
+This section defines the permission framework that governs access to cost center data. These rules apply to all users, regardless of capability flags. An Administrator's cost center access is implicit and unrestricted — the grants defined here are evaluated only for non-Administrator users.
+
+A user's access to cost center data is determined by two independent grants applied per assigned cost center:
+
+- **Standard permission grant** — controls read and write access to budget lines and non-confidential workforce planning data (position records excluding compensation fields).
+
+- **Confidential data grant** — controls access to compensation data within workforce planning records, including base salary, applied burden rates, derived compensation components, and total employment cost.
+
+The two grants are fully independent. A user may have ALL_WRITE on the standard grant and ALL_NONE on the confidential grant for the same cost center — meaning they can enter budget lines but cannot see or modify compensation data.
+
+## 4.1 Standard Permission Grant
+
+| **Grant value** | **Read budget lines** | **Write budget lines** | **Read positions (non-confidential)** | **Write positions (non-confidential)** |
+| --- | --- | --- | --- | --- |
+| ALL_WRITE | Yes | Yes | Yes | Yes |
+| ALL_READ (default) | Yes | No | Yes | No |
+
+The default standard permission grant when a cost center is first assigned to a user is ALL_READ. An Administrator must explicitly elevate the grant to ALL_WRITE.
+
+## 4.2 Confidential Data Grant
+
+Confidential information is defined as: base salary, applied burden rates, burden amount components, total employment cost, and any derived fields that expose compensation values on a position record.
+
+| **Grant value** | **Read compensation data** | **Write compensation data** |
+| --- | --- | --- |
+| ALL_WRITE | Yes | Yes |
+| ALL_READ | Yes | No |
+| ALL_NONE (default) | No | No |
+
+The default confidential data grant when a cost center is first assigned to a user is ALL_NONE. An Administrator must explicitly grant ALL_READ or ALL_WRITE. A user with ALL_NONE can see that positions exist and view non-confidential attributes (job title, FTE, start and end dates) but cannot see any compensation values.
+
+| **Claude Code Note — Confidential data field-level enforcement** | **Enforce confidential data access at the API response layer on every request — never rely on the frontend to suppress fields. When returning a position record to a user with ALL_NONE confidential grant for that cost center, strip all compensation fields (base_salary, burden_rate, burden_amount, total_compensation, and any derived fields) from the response payload. These fields must be absent from the payload entirely, not null or zero. Their absence is the signal to the frontend that the user lacks access. Write attempts against compensation fields by a user with ALL_NONE or ALL_READ confidential grant must return HTTP 403. This enforcement also applies to the Finance Review module****'****s GET /api/v1/finance-review/{review_id} budget_summary payload. Compensation fields are excluded from the budget_summary response when the Finance Reviewer has ALL_NONE confidential grant for the cost center under review. See Functional Requirements: Finance Approval Workflow v1.2 Section 9.2.** |
+| --- | --- |
+
+## 4.3 Cost Center Assignment
+
+### 4.3.1 Individual Cost Center Assignment
+
+An Administrator assigns a specific cost center to a user and sets the standard permission grant and confidential data grant for that cost center explicitly. This is the most precise form of assignment and always takes precedence over rollup-based assignments.
+
+### 4.3.2 Rollup Assignment
+
+An Administrator may assign a cost center rollup (a parent node in the cost center hierarchy) to a user. The assignment covers all cost centers that are children of that rollup node, both at the time of assignment and in the future — if new cost centers are added under the rollup, the user gains access to them automatically.
+
+When a rollup is assigned, the Administrator sets a default standard permission grant and default confidential data grant that apply to all cost centers within the rollup. Individual cost centers within the rollup may be overridden afterward — the rollup assignment is a starting point, not a lock.
+
+| **Assignment type** | **Scope** | **Default behavior** | **Override capability** |
+| --- | --- | --- | --- |
+| Individual cost center | Single cost center | Grants set explicitly at assignment | N/A — always per-cost-center |
+| Rollup | All child cost centers of rollup node, including future additions | Default grants apply to all children at rollup level | Per-cost-center overrides permitted after rollup assignment |
+
+### 4.3.3 Permission Resolution
+
+When the API evaluates whether a user can perform an action on a cost center, the following precedence rules apply:
+
+- If the user is_administrator = TRUE: full access granted without evaluating any grants.
+
+- If the cost center has an explicit individual assignment for the user: the grants on that individual assignment are used — regardless of whether the cost center also falls under a rollup assignment.
+
+- If the cost center falls under a rollup assignment for the user and has a cost-center-level override set within that rollup: the override grants are used.
+
+- If the cost center falls under a rollup assignment for the user with no cost-center-level override: the rollup default grants are used.
+
+- If none of the above applies: the user has no access to that cost center and the request returns HTTP 403.
+
+| **Claude Code Note — Permission resolution implementation** | **Resolve effective grants at query construction time, not after data retrieval. Inject cost center scope into the SQL WHERE clause before executing any query. Resolution order for a non-Administrator user:   (1) Check obs.user_cost_center_grants for an individual assignment row (user_id, cost_center_id).   (2) If not found, check obs.user_rollup_grants for a covering rollup, then obs.user_rollup_overrides       for a cost-center-level override within that rollup.   (3) Apply resolved grants as predicates. Never retrieve unrestricted data and filter afterward. This resolution logic applies equally for Finance Review module API routes — the caller****'****s assigned cost center scope is injected into the WHERE clause before querying obs.finance_review_records.** |
+| --- | --- |
+
+## 4.4 Reporting Scope for Cost Center Assignments
+
+- A user's report data is always scoped to their assigned cost centers. Rows for unassigned cost centers are excluded from query results and from Excel exports.
+
+- Rollup summary reports aggregate only across cost centers the user is assigned to. Unassigned cost centers are not visible even as aggregated totals.
+
+- Variance data (actuals minus budget) is visible to a user on any cost center where they have at least ALL_READ standard grant.
+
+- Compensation data in workforce planning reports is visible only to users with at least ALL_READ confidential grant for the relevant cost center.
+
+- Excel export respects all grants — a user cannot export data they cannot view. Compensation columns are excluded from exports for cost centers where the user has ALL_NONE confidential grant.
+
+- System Modelers and Report Developers can read report data across all cost centers for report building and testing purposes — this is a capability-flag-level access, not governed by cost center grants.
+
+- Finance Reviewers can read report data only within their assigned cost center scope — the is_finance_reviewer flag does not confer system-wide report access.
+
+# 5. Permission Matrix Summary
+
+The following table summarizes effective permissions for each capability combination. For cost center access, the table shows maximum possible access — actual access is always further scoped by individual assignments and grants.
+
+| **Capability** | **Administrator** | **System Modeler** | **Report Developer** | **Finance Reviewer** | **Cost center assignment (max)** |
+| --- | --- | --- | --- | --- | --- |
+| Authenticate via Entra ID SSO | Required | Required | Required | Required | Required |
+| OBS login (is_active) | Must be set | Must be set | Must be set | Must be set | Must be set |
+| Grant login / set capability flags | Full | None | None | None | None |
+| Assign cost centers to users | Full | None | None | None | None |
+| Budget line read | All cost centers | None by flag alone | None by flag alone | Assigned cost centers (ALL_READ min) | Assigned cost centers |
+| Budget line write | All cost centers | None by flag alone | None by flag alone | None by flag alone | Assigned with ALL_WRITE |
+| Position read (non-confidential) | All cost centers | None by flag alone | None by flag alone | None by flag alone | Assigned cost centers |
+| Position write (non-confidential) | All cost centers | None by flag alone | None by flag alone | None by flag alone | Assigned with ALL_WRITE |
+| Compensation data read | Implicit full | None by flag alone | None by flag alone | None by flag alone | Assigned with ALL_READ or ALL_WRITE confidential grant |
+| Compensation data write | Implicit full | None by flag alone | None by flag alone | None by flag alone | Assigned with ALL_WRITE confidential grant |
+| Report read — all cost centers | Full | Full | Full | None by flag alone | Assigned cost centers only |
+| Report definition authoring | Full | None | Full | None | None |
+| Finance Review — view queue | All cost centers | None | None | Assigned cost centers only | None |
+| Finance Review — approve/reject | All cost centers | None | None | Assigned cost centers only | None |
+| Excel export | Full | Per report access | Per report access | Per report access (assigned CCs only) | Assigned cost centers only |
+| Audit log read | Full | Full | Full | None | None |
+| Batch import monitoring | Full | Read-only | Read-only | None | None |
+| Business rules configuration write | Full | Full | None | None | None |
+| System configuration / data model changes | Full | Full | None | None | None |
+| Reference data management | Full | Read-only | Read-only | Read-only | Read-only |
+
+# 6. Data Scoping Rules
+
+## 6.1 General Principles
+
+- All data access decisions are made server-side. The frontend is a rendering layer and must never be relied upon to enforce access control.
+
+- Cost center scope is applied at query construction time — injected into WHERE clauses before execution, never filtered after retrieval.
+
+- A user must never be able to infer the existence or content of data they do not have access to, including through error messages, record counts, or response timing.
+
+- Write operations — creates, updates, and deletes — must validate capability flags and cost center permission grants before executing. Read access does not imply write access.
+
+- All data mutations are recorded in the audit log regardless of who performs the mutation. See Section 8.
+
+## 6.2 Cost Center Data Scoping
+
+| **Flag / grant combination** | **Budget line scope** | **Position scope** | **Actuals scope** |
+| --- | --- | --- | --- |
+| is_administrator = TRUE | All cost centers — read and write | All cost centers — read and write including compensation | All cost centers |
+| is_finance_reviewer = TRUE (no cost center grants) | None | None | None |
+| is_finance_reviewer = TRUE + ALL_READ standard grant | Assigned cost centers — read only | None by standard grant — requires confidential grant | Assigned cost centers (read-only, via Finance Review) |
+| is_system_modeler or is_report_developer (no cost center grants) | None | None | None — only via reports |
+| Cost center assignment — ALL_READ standard / ALL_NONE confidential | Assigned cost centers — read only | Assigned cost centers — read, non-confidential fields only | Assigned cost centers |
+| Cost center assignment — ALL_WRITE standard / ALL_NONE confidential | Assigned cost centers — read and write | Assigned cost centers — read and write, non-confidential fields only | Assigned cost centers |
+| Cost center assignment — ANY standard / ALL_READ confidential | Per standard grant | Per standard grant + compensation fields readable | Assigned cost centers |
+| Cost center assignment — ALL_WRITE standard / ALL_WRITE confidential | Assigned cost centers — read and write | Assigned cost centers — read and write including compensation | Assigned cost centers |
+
+## 6.3 Confidential Data Field Classification
+
+The following fields are classified as confidential within the OBS. Access is governed by the confidential data grant for cost center assignments, and is implicit full access for Administrators.
+
+| **Entity** | **Confidential fields** |
+| --- | --- |
+| Position record | base_salary, burden_rate (all applied rates), burden_amount (all components), total_compensation, new_annual_salary, salary_expense, aipeip_bonus, other_bonus |
+| Headcount plan summary | Any aggregated compensation totals derived from position compensation fields |
+| Workforce planning reports | Any report column that exposes or derives from position compensation fields |
+| Excel export — workforce | All compensation columns in any workforce planning export |
+| Finance Review — budget_summary payload | Same compensation fields as Position record above. Excluded from the GET /api/v1/finance-review/{review_id} response when the Finance Reviewer has ALL_NONE confidential grant for the cost center under review. |
+
+# 7. User Provisioning and Lifecycle
+
+## 7.1 Provisioning
+
+User accounts in the OBS are created by Administrators through the system administration module. Provisioning in the OBS is separate from Entra ID account management — a user must have an active Entra ID account in the corporate directory before they can be provisioned in the OBS, but the OBS does not create or manage Entra ID accounts.
+
+When provisioning a new user, the Administrator must:
+
+- Locate the user's Entra ID record by email address or display name and confirm their Entra ID object ID (oid).
+
+- Set is_active = TRUE to grant login permission.
+
+- Set capability flags as appropriate: is_administrator, is_system_modeler, is_report_developer, is_finance_reviewer.
+
+- For cost center access: assign one or more cost centers or cost center rollups, setting the standard permission grant and confidential data grant for each. For Finance Reviewers, ALL_READ standard grant is the minimum required to view submitted budget data.
+
+## 7.2 Login Permission — Granting and Revoking
+
+The is_active flag on the OBS user registry record is the sole determinant of whether a user can log in to OBS. An Administrator sets this flag at provisioning time and can revoke it at any time. Revoking login permission (is_active = FALSE) has the following effects:
+
+- Immediately prevents the user from completing a new OBS login — even if their Entra ID account remains active.
+
+- Invalidates the user's active OBS session at the next token validation cycle (within 60 minutes, at access token expiry).
+
+- Does not delete any data authored by the user — all historical records, audit entries, and attributed mutations are preserved.
+
+- Is recorded in the audit log with the acting Administrator's user ID.
+
+User records in the OBS registry are never deleted — only deactivated via is_active = FALSE. This preserves the integrity of the audit log and historical attribution.
+
+## 7.3 Capability Flag and Permission Grant Changes
+
+All capability flag changes and cost center grant changes take effect at the user's next login (next access token issuance). Active sessions are not invalidated on permission changes. If immediate effect is required, the Administrator must revoke and re-grant login permission (is_active = FALSE, then TRUE), which forces a new login.
+
+All capability and permission changes are recorded in the audit log: acting Administrator's user ID, affected user's ID, previous state, and new state.
+
+| **Claude Code Note — User registry schema (key tables)** | **obs.users:   user_id (Entra ID oid), display_name, email, is_active,   is_administrator, is_system_modeler, is_report_developer,   is_finance_reviewer,   created_at, created_by, updated_at, updated_by obs.user_cost_center_grants:   user_id, cost_center_id,   standard_grant (ALL_WRITE │ ALL_READ),   confidential_grant (ALL_WRITE │ ALL_READ │ ALL_NONE),   granted_by, granted_at obs.user_rollup_grants:   user_id, rollup_id, default_standard_grant, default_confidential_grant,   granted_by, granted_at obs.user_rollup_overrides:   user_id, rollup_id, cost_center_id, standard_grant, confidential_grant,   set_by, set_at Grant removals are logged in the audit log before deletion. The is_finance_reviewer flag uses the same grant/revoke patterns as is_system_modeler and is_report_developer. Setting or clearing is_finance_reviewer generates a FINANCE_REVIEWER_FLAG_SET audit event (see Section 8.1).** |
+| --- | --- |
+
+# 8. Audit Logging
+
+All data mutations and security-relevant events must be recorded in the OBS audit log stored in the PostgreSQL obs schema. The full audit record structure is defined in the Application Architecture Specification v3.6, Section 7. This section defines the access control events specific to this specification.
+
+## 8.1 Access Control Events
+
+| **Event type** | **Trigger** | **Key fields captured** |
+| --- | --- | --- |
+| USER_PROVISIONED | Administrator creates a new OBS user registry record | New user ID, initial flags, cost center grants assigned, Administrator user ID |
+| LOGIN_PERMISSION_GRANTED | Administrator sets is_active = TRUE for a user | User ID, Administrator user ID |
+| LOGIN_PERMISSION_REVOKED | Administrator sets is_active = FALSE for a user | User ID, Administrator user ID |
+| CAPABILITY_FLAG_CHANGED | Administrator changes any capability flag (is_system_modeler, is_report_developer) for a user | User ID, flag name, previous value, new value, Administrator user ID |
+| FINANCE_REVIEWER_FLAG_SET | Administrator sets or clears is_finance_reviewer for a user | target_user_id, set_by (Administrator user_id), old_value (BOOLEAN), new_value (BOOLEAN), timestamp |
+| COST_CENTER_GRANT_ADDED | Administrator assigns a cost center or rollup to a user | User ID, cost center or rollup ID, standard grant, confidential grant, Administrator user ID |
+| COST_CENTER_GRANT_MODIFIED | Administrator changes grants on an existing assignment | User ID, cost center or rollup ID, previous grants, new grants, Administrator user ID |
+| COST_CENTER_GRANT_REMOVED | Administrator removes a cost center assignment | User ID, cost center or rollup ID, Administrator user ID |
+| ROLLUP_OVERRIDE_SET | Administrator sets a per-cost-center override within a rollup | User ID, rollup ID, cost center ID, grants, Administrator user ID |
+| USER_LOGIN | User successfully authenticates and loads an OBS session | User ID, active flags snapshot (all five flags), IP address, session ID |
+| USER_LOGIN_DENIED | Entra ID authentication succeeded but OBS registry lookup failed or is_active = FALSE | Entra ID oid presented, IP address, denial reason |
+| USER_LOGOUT | User explicitly logs out | User ID, session ID |
+
+Note: FINANCE_REVIEWER_FLAG_SET is a distinct event type from CAPABILITY_FLAG_CHANGED to allow targeted audit queries for Finance Reviewer provisioning changes. Implementations may choose to merge these into CAPABILITY_FLAG_CHANGED with flag_name = 'is_finance_reviewer', provided the key fields captured are equivalent.
+
+## 8.2 Audit Log Access
+
+- Write access to the audit log is limited to the OBS service identities — the App Service managed identity (API) and the Azure Functions managed identity (ingestion pipeline). No user can write audit records directly.
+
+- Read access within the OBS application is available to Administrators, System Modelers, and Report Developers. Users with only cost center access — including Finance Reviewers who hold no other capability flags — have no audit log access.
+
+- Append-only enforcement on the obs.audit_log table is implemented via a BEFORE UPDATE OR DELETE trigger that raises an exception, rejecting any attempted modification or deletion. Update and delete operations on audit records are not permitted.
+
+- Audit records are retained for a minimum of 3 years, consistent with the Application Architecture Specification v3.6.
+
+# 9. API Security Controls
+
+## 9.1 Request Authorization Flow
+
+Every API request must be processed in the following sequence:
+
+- **Step 1 — Token validation:** Validate the Entra ID access token signature, expiry, audience, and issuer. Return HTTP 401 on any failure.
+
+- **Step 2 — User resolution:** Look up the authenticated user's oid in obs.users. Return HTTP 403 if no record exists or is_active = FALSE.
+
+- **Step 3 — Administrator check:** If is_administrator = TRUE, grant full access and proceed to execution (Step 7). Skip Steps 4–6.
+
+- **Step 4 — Capability flag check:** Verify the user's capability flags (is_system_modeler, is_report_developer, is_finance_reviewer) permit the requested operation class. Finance Review module routes require is_finance_reviewer = TRUE or is_administrator = TRUE. Return HTTP 403 if the required flag is not set.
+
+- **Step 5 — Cost center scope check:** For operations on cost center data, verify the user has an active assignment covering the cost center(s) involved. Return HTTP 403 if not. For Finance Review routes, verify the requested cost center falls within the Finance Reviewer's resolved scope.
+
+- **Step 6 — Permission grant check:** Verify the user's standard grant supports the operation (ALL_WRITE required for write operations). For compensation fields, verify the confidential grant. Strip confidential fields from response payloads where ALL_NONE applies; return HTTP 403 on write attempts without sufficient grant.
+
+- **Step 7 — Execute and log:** Execute the operation and write the audit log entry.
+
+## 9.2 Error Response Standards
+
+| **HTTP status** | **Meaning in OBS context** | **When to use** |
+| --- | --- | --- |
+| 401 Unauthorized | Token missing, expired, or invalid | Step 1 failure — no valid Entra ID token |
+| 403 Forbidden | Authenticated but not authorized | Steps 2–6 failure — valid token but is_active = FALSE, insufficient flags, or insufficient grants |
+| 404 Not Found | Resource genuinely does not exist | Only when the resource does not exist AND the user would have access if it did. Never use 404 to obscure a resource from an unauthorized user. |
+
+| **Claude Code Note — Authorization middleware pattern** | **Implement authorization as FastAPI middleware or dependency injection applied to every route. The authorization chain (Steps 1–7 above) must be declared once and applied consistently. Each route declares its required capability (administrator │ system_modeler │ report_developer │ finance_reviewer │ cost_center_access) and its operation type (read │ write │ admin). The middleware resolves whether the authenticated user meets those requirements before the route handler executes. Cost center scope injection (for cost-center-scoped routes) is handled in middleware — route handlers receive a pre-validated, scoped query context. Route handlers must not perform their own cost center filtering independently. For Finance Review module routes:   Required capability: finance_reviewer (or administrator).   Cost center scope: resolved from obs.user_cost_center_grants and obs.user_rollup_grants using   standard resolution order.   The approve and reject actions do not require ALL_WRITE standard grant — they require only the   is_finance_reviewer flag and cost center scope coverage.** |
+| --- | --- |
+
+# 10. Budget Entry Locking
+
+This section records the resolved budget entry locking decisions established in Functional Requirements: Budget Planning v1.1 Section 8. All decisions below are authoritative for access control implementation.
+
+Important: Budget entry locking is distinct from the read-only state that applies to Submitted budgets. A budget entry lock is an explicit Administrative action independent of budget submission status.
+
+## 10.1 Lock Granularity
+
+| **Decision: ****Lock applies at cost center + fiscal year + budget version. A budget entry lock is applied to a specific combination of cost center, fiscal year, and budget version. All expense accounts and all planning periods within that combination become read-only when locked. There is no account-group-level or planning-period-level locking.** |
+| --- |
+
+## 10.2 Lock Authority
+
+| **Decision: ****Administrators only may lock and unlock budget entries. Only users with is_administrator = TRUE may apply or remove a budget entry lock. Users with ALL_WRITE standard grant, System Modelers, Report Developers, and Finance Reviewers may not apply or remove locks. The Administrator capability flag supersedes cost center access grants for locking operations — an Administrator may lock any cost center regardless of whether they have an explicit cost center access grant for it.** |
+| --- |
+
+## 10.3 Locked-State Permissions
+
+| **User Type** | **Permitted Operations on a Locked Budget** |
+| --- | --- |
+| Administrator | Full read and write access. Budget entry locks do not restrict Administrator operations. |
+| ALL_WRITE standard grant (non-Administrator) | Fully read-only. No budget line creates, updates, or deletes. No vendor line item creates, updates, or deletes. No budget workflow submission. The Save button and all editable cells are suppressed in the UI. The API returns HTTP 403 for any write attempt against a locked combination. |
+| ALL_READ standard grant | Read-only — unchanged from their normal access level. |
+| System Modeler / Report Developer | Read access per their normal capability. No write access to budget lines regardless of lock state. |
+| Finance Reviewer | Read-only view of budget data within their assigned cost center scope (standard grant permitting). Finance Reviewers cannot submit, approve, or reject a locked budget — the submission API returns HTTP 409 for locked combinations. Finance Reviewer approve and reject actions operate on submitted budgets; a lock does not prevent approval actions on already-submitted budgets. |
+
+## 10.4 Lock Audit Events
+
+| **Event Type** | **Captured Fields** |
+| --- | --- |
+| BUDGET_LOCK_APPLIED | version_id, cost_center_id, fiscal_year, user_id (must be Administrator), timestamp |
+| BUDGET_LOCK_REMOVED | version_id, cost_center_id, fiscal_year, user_id (must be Administrator), timestamp |
+
+## 10.5 Lock Schema and API
+
+| **Claude Code Note — Budget entry lock schema and API** | **New table: obs.budget_version_locks   lock_id        STRING NOT NULL (generated UUID)   version_id     STRING NOT NULL  -- FK obs.budget_versions   cost_center_id STRING NOT NULL   fiscal_year    INT NOT NULL   is_locked      BOOLEAN NOT NULL DEFAULT FALSE   locked_at      TIMESTAMP (nullable)   locked_by      STRING (nullable — user_id of locking Administrator)   PRIMARY KEY (version_id, cost_center_id, fiscal_year) POST /api/v1/budget-version-locks   Body: { version_id, cost_center_id, fiscal_year, action: ****'****lock****'**** │ ****'****unlock****'**** }   Authorization: is_administrator = TRUE required. Returns HTTP 403 otherwise.   Returns HTTP 200 on success. All budget line write endpoints (PUT /api/v1/budget-lines/bulk etc.) must check obs.budget_version_locks before processing. If is_locked = TRUE and caller is not Administrator:   return HTTP 403 with message ****'****Budget entry is locked for this cost center, fiscal year, and version.****'**** Write BUDGET_LOCK_APPLIED or BUDGET_LOCK_REMOVED audit event after successful state change.** |
+| --- | --- |
+
+## 10.6 Lock Display (UI)
+
+- When a budget is locked, a lock status banner is displayed in the Budget Planning module: 'Budget entry locked — contact your Administrator to unlock.'
+
+- A lock icon is displayed in the budget version selector alongside the version name.
+
+- The budget entry grid renders in read-only mode for all non-Administrator users when locked — no editable cells, no Save button, no Submit button.
+
+# 11. Acceptance Criteria
+
+Each criterion below must be verified by automated test or documented manual test procedure before the security and access control implementation is considered complete.
+
+## 11.1 Authentication and Login Permission
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-AUTH-01** | A request with no access token returns HTTP 401 on every API endpoint. |
+| **AC-AUTH-02** | A request with an expired access token returns HTTP 401. |
+| **AC-AUTH-03** | A valid Entra ID token for a user with no OBS registry record returns HTTP 403. |
+| **AC-AUTH-04** | A valid Entra ID token for a user with is_active = FALSE returns HTTP 403. |
+| **AC-AUTH-05** | A user whose is_active is set to FALSE cannot complete a new OBS login even while their Entra ID account remains active. |
+| **AC-AUTH-06** | Refresh tokens are stored in httpOnly secure cookies and access tokens in memory only — neither is accessible via localStorage. |
+| **AC-AUTH-07** | Logout revokes the refresh token and redirects to the Entra ID logout endpoint. |
+
+## 11.2 Capability Flag Enforcement
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-CAP-01** | A user with is_administrator = TRUE can read and write budget lines and position records for any cost center without a cost center assignment. |
+| **AC-CAP-02** | A user with is_administrator = TRUE has implicit full access to all compensation data without any confidential grant. |
+| **AC-CAP-03** | A user with is_system_modeler = TRUE and no cost center assignments cannot read or write budget lines or position records. |
+| **AC-CAP-04** | A user with is_report_developer = TRUE and no cost center assignments cannot read or write budget lines or position records. |
+| **AC-CAP-05** | A user with is_system_modeler = TRUE can write business rules configuration. A user without this flag or is_administrator cannot. |
+| **AC-CAP-06** | A user with is_report_developer = TRUE can create and publish report definitions. A user without this flag or is_administrator cannot. |
+| **AC-CAP-07** | A user with both is_system_modeler = TRUE and is_report_developer = TRUE has all capabilities of both flags combined. |
+| **AC-CAP-08** | The system prevents the last active Administrator from being deactivated or having is_administrator set to FALSE. |
+| **AC-CAP-09** | A user with is_finance_reviewer = TRUE and no cost center assignments can access the Finance Review module navigation item and API routes but receives no finance review records in the Approval Queue response. |
+| **AC-CAP-10** | A user without is_finance_reviewer = TRUE and without is_administrator = TRUE calling any Finance Review API endpoint receives HTTP 403, regardless of any cost center grants they hold. |
+| **AC-CAP-11** | Setting or clearing the is_finance_reviewer flag generates a FINANCE_REVIEWER_FLAG_SET audit event with old_value and new_value captured. Only Administrator tokens may set or clear this flag — non-Administrator attempts return HTTP 403. |
+
+## 11.3 Cost Center Access and Grant Enforcement
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-GRANT-01** | A user with no cost center assignments cannot read or write any budget lines or position records. |
+| **AC-GRANT-02** | A user with ALL_READ standard grant on a cost center can read but not write budget lines for that cost center. |
+| **AC-GRANT-03** | A user with ALL_WRITE standard grant on a cost center can read and write budget lines for that cost center. |
+| **AC-GRANT-04** | A user assigned via a rollup can access all child cost centers of that rollup. |
+| **AC-GRANT-05** | A new cost center added under a rollup is automatically accessible to users assigned to that rollup. |
+| **AC-GRANT-06** | A per-cost-center override within a rollup assignment takes precedence over the rollup default grant for that cost center. |
+| **AC-GRANT-07** | An individual cost center assignment takes precedence over any rollup-based grant for that same cost center. |
+| **AC-GRANT-08** | Cost center scope is applied in the SQL WHERE clause at query construction time — verified by query plan inspection in automated tests. |
+
+## 11.4 Confidential Data Enforcement
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-CONF-01** | A user with ALL_NONE confidential grant on a cost center receives no compensation fields in position API responses for that cost center — fields are absent from the payload, not null. |
+| **AC-CONF-02** | A user with ALL_NONE confidential grant cannot write compensation data for positions in that cost center — the attempt returns HTTP 403. |
+| **AC-CONF-03** | A user with ALL_READ confidential grant can read but not write compensation data for an assigned cost center. |
+| **AC-CONF-04** | A System Modeler or Report Developer with no cost center assignments and no explicit confidential grant receives no compensation fields for any cost center. |
+| **AC-CONF-05** | An Administrator receives full compensation data for all cost centers without any explicit grant. |
+| **AC-CONF-06** | Excel export excludes compensation columns for cost centers where the exporting user has ALL_NONE confidential grant. |
+| **AC-CONF-07** | A Finance Reviewer with ALL_NONE confidential grant on a cost center receives no compensation fields in the budget_summary payload of the GET /api/v1/finance-review/{review_id} response — fields are absent from the payload, not null or zero. |
+
+## 11.5 Audit Log
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-AUDIT-01** | Every login permission grant and revocation generates an audit record with all required fields. |
+| **AC-AUDIT-02** | Every capability flag change generates an audit record capturing previous and new flag state. |
+| **AC-AUDIT-03** | Every cost center grant addition, modification, and removal generates an audit record. |
+| **AC-AUDIT-04** | Every login and login denial generates an audit record. |
+| **AC-AUDIT-05** | Audit records cannot be updated or deleted via any API endpoint or direct PostgreSQL write by any user; the BEFORE UPDATE OR DELETE trigger on obs.audit_log rejects such operations. |
+| **AC-AUDIT-06** | A user with only cost center access (no capability flags set) cannot read the audit log. A user with is_finance_reviewer = TRUE and no other capability flags cannot read the audit log. |
+| **AC-AUDIT-07** | Audit records are retained for a minimum of 3 years as enforced by the PostgreSQL retention policy. |
+
+## 11.6 Budget Entry Locking
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-LOCK-01** | Only Administrator tokens may call POST /api/v1/budget-version-locks. Non-Administrator calls return HTTP 403. |
+| **AC-LOCK-02** | When is_locked = TRUE for a cost center + fiscal year + version, all budget line write endpoints return HTTP 403 for non-Administrator callers. |
+| **AC-LOCK-03** | Administrator tokens bypass the lock check — write operations by Administrators succeed regardless of lock state. |
+| **AC-LOCK-04** | Applying a lock generates a BUDGET_LOCK_APPLIED audit event with version_id, cost_center_id, fiscal_year, user_id, and timestamp. |
+| **AC-LOCK-05** | Removing a lock generates a BUDGET_LOCK_REMOVED audit event with version_id, cost_center_id, fiscal_year, user_id, and timestamp. |
+| **AC-LOCK-06** | The lock status banner and read-only grid are rendered in the Budget Planning module for all non-Administrator users when the selected cost center + fiscal year + version combination has is_locked = TRUE. |
+
+# 12. Document Control
+
+| **Version** | **Date** | **Author** | **Change summary** |
+| --- | --- | --- | --- |
+| 1.0 | Draft | TBD | Initial version — three-role model (Administrator, Modeler, User); cost center permission framework; confidential data grant model; audit log access controls; budget entry locking placeholder. |
+| 1.1 | Draft | TBD | Revised capability model: retired single Modeler role; introduced is_administrator, is_system_modeler, is_report_developer boolean flags; User role replaced by cost center access grants; added is_active login permission flag; updated all sections, permission matrix, schema notes, and acceptance criteria to reflect new model. Aligned with Domain Glossary v1.3. |
+| 1.2 | Draft | TBD | Section 10 budget entry locking placeholder resolved: decisions on lock granularity (cost center + fiscal year + version), lock authority (Administrators only), locked-state permissions (fully read-only for non-Administrators), lock audit events (BUDGET_LOCK_APPLIED, BUDGET_LOCK_REMOVED), lock schema (obs.budget_version_locks), and lock API (POST /api/v1/budget-version-locks) now specified. Acceptance criteria AC-LOCK-01 through AC-LOCK-06 added. Resolves OI-BP-01 from Functional Requirements: Budget Planning v1.1. |
+| 1.3 | Draft | TBD | Resolves OI-FAW-02 from Functional Requirements: Finance Approval Workflow v1.2. Adds is_finance_reviewer as the fourth capability flag. Section 2.3 updated. Section 3 narrative updated. Section 3.4 Finance Reviewer added. Sections 3.5–3.6 renumbered. Finance Reviewer rows added to combined capability examples and permission matrix. Section 4.2 confidential data note extended. Section 4.4 Finance Reviewer scoping note added. Section 6.2 and 6.3 Finance Reviewer rows added. Section 7.1 updated. Section 8.1 FINANCE_REVIEWER_FLAG_SET event added. Section 9.1 Step 4 updated. Section 10.3 Finance Reviewer row added. AC-CAP-09 through AC-CAP-11 added. AC-CONF-07 added. AC-AUDIT-06 updated. |
+| 1.3 — Full Restatement | Draft | TBD | Full restatement incorporating all content from v1.0 through v1.3. All sections present in full. Depends-on references updated to Architecture v3.5, Glossary v1.9. Supersedes all prior versions. |
+| 1.4 — Full Restatement | Draft | Claude | Databricks-free platform cascade aligned to Architecture Spec v3.6. Data-store references for the user registry, business-rules configuration, and the audit log changed from Delta Lake to the PostgreSQL obs schema. Audit-log append-only enforcement restated from a Delta Lake append-only table property to a PostgreSQL BEFORE UPDATE OR DELETE trigger on obs.audit_log (§ audit logging; AC-AUDIT-05, AC-AUDIT-07). Audit-log write access repointed to the App Service managed identity (API) and the Azure Functions managed identity (ingestion). All Azure Key Vault language retained unchanged. Depends-on and related-document references updated to Architecture v3.6. |
+| 1.4 — Full Restatement (errata) | Draft | Claude | Version-reference corrections per Specification Consistency & Errata Report v1.0 (in-place errata; no technical content changed). Active references in the depends-on header, relationship/related-documents lists, and instructional cross-references updated to current versions: System Context and Domain Glossary v1.9 → v1.11; Functional Requirements: Workforce Planning v1.0 → v1.1; Data Integration Specification v1.5 → v1.6; In-Application Notification Mechanism Specification v1.0 → v1.1; Security and Access Control Specification v1.3 → v1.4; UX and UI Specification v1.4 → v1.5; Project Context Handoff v2.3 → v2.4 (as applicable to this document). Historical Document Control rows and open-item resolution narratives describing past events are unchanged. |
+
+**Related documents:**
+
+- OPEX Budgeting System — System Context and Domain Glossary v1.11
+
+- OPEX Budgeting System — Application Architecture Specification v3.6
+
+- OPEX Budgeting System — UX and UI Specification v1.5
+
+- OPEX Budgeting System — Data Integration Specification v1.6
+
+- OPEX Budgeting System — Functional Requirements: Budget Planning v1.1
+
+- OPEX Budgeting System — Functional Requirements: Workforce Planning v1.1
+
+- OPEX Budgeting System — Functional Requirements: Reporting v1.1
+
+- OPEX Budgeting System — Functional Requirements: Finance Approval Workflow v1.2
+
+OBS_Security_and_Access_Control_Specification_v1_4_Full.docx Page of
+
+Page  of

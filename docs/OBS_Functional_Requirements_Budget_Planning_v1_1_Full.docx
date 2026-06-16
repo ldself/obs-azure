@@ -1,0 +1,751 @@
+OPEX Budgeting System  —  Functional Requirements: Budget Planning**	CONFIDENTIAL | DRAFT**
+
+**OPEX Budgeting System**
+
+**Functional Requirements: Budget Planning**
+
+*Version 1.1 — Full Restatement*
+
+*OBS_Functional_Requirements_Budget_Planning_v1_1_Full.docx*
+
+| **Document title** | **Functional Requirements: Budget Planning** |
+| --- | --- |
+| **System** | OPEX Budgeting System (OBS) |
+| **Version** | 1.1 — Full Restatement |
+| **Status** | For Review |
+| **Audience** | Development Team, Technical Leads, Project Stakeholders |
+| **Depends on** | OBS Application Architecture Specification v3.6; OBS System Context and Domain Glossary v1.11; OBS Security and Access Control Specification v1.4; OBS UX and UI Specification v1.5; OBS Data Integration Specification v1.6 |
+
+| ***Full Restatement Notice: This document is a full restatement of Functional Requirements: Budget Planning incorporating all amendments from v1.0 through v1.1. It supersedes all prior versions. All sections (1–17) are present in full — there is no need to consult any prior version file.*** |
+| --- |
+
+# 1. Purpose and Scope
+
+This document specifies the functional requirements for the Budget Planning module of the OPEX Budgeting System (OBS). It defines what the system must do — the business rules, data rules, access control behaviours, and acceptance criteria that govern budget line entry, budget version management, vendor attribution, overhead allocation, calculation rules, budget entry locking, and budget submission.
+
+This specification resolves the following open items from predecessor documents:
+
+- **Security and Access Control Specification v1.1 — Section 10 placeholder:** budget entry locking mechanics.
+
+- **Data Integration Specification v1.2 — OI-DI-06:** cost center hierarchy maintenance boundary.
+
+- **Project Context Handoff v1.4 — open item:** complex business rules (compensation burden rates, overhead allocation formulas, fiscal calendar logic).
+
+All architectural decisions recorded in the Application Architecture Specification v3.6, Security and Access Control Specification v1.4, UX and UI Specification v1.5, and Data Integration Specification v1.6 are final and are not re-litigated here. This document adds functional detail on top of those decisions without contradicting them.
+
+## 1.1 In Scope
+
+- Budget line entry and editing — non-personnel expense accounts.
+
+- Budget line derivation — personnel expense accounts (read-only, sourced from Workforce Planning).
+
+- Overhead allocation — calculated read-only budget lines derived from headcount and geography-based rates.
+
+- Vendor attribution — per-period vendor line items on designated expense accounts.
+
+- Budget version management — creation (via clone), naming, activation, archiving, and deletion.
+
+- Budget target management — per cost center / expense account / planning period / budget version.
+
+- Calculation service rules — compensation burden rates and overhead allocation rates.
+
+- Budget entry locking — granularity, authority, locked-state permissions, and audit events.
+
+- Budget entry workflow — guided three-step entry process (personnel → non-personnel → review and submit).
+
+- Budget submission — status transitions, mandatory commentary, Finance routing.
+
+- Cost center hierarchy maintenance boundary — OBS-managed changes post initial import, including bulk cost center upload.
+
+- PostgreSQL schema additions and API endpoint requirements for all of the above.
+
+## 1.2 Out of Scope
+
+- Finance-side approval workflow — fully specified in Functional Requirements: Finance Approval Workflow v1.2.
+
+- Workforce planning functional requirements — covered in Functional Requirements: Workforce Planning v1.1.
+
+- Reporting functional requirements — covered in Functional Requirements: Reporting v1.1.
+
+- Account hierarchy maintenance — the account hierarchy is read-only in OBS; the ingestion pipeline is the only write path (Data Integration Specification v1.6).
+
+## 1.3 Relationship to Other Specifications
+
+| **Document** | **Version** | **Relationship** |
+| --- | --- | --- |
+| System Context and Domain Glossary | v1.9 | Authoritative terminology source. All terms used in this document carry the exact meanings defined there. |
+| Application Architecture Specification | v3.6 | Authoritative architecture. API patterns, calculation service dry-run pattern, PostgreSQL schema conventions, and technology choices are final. |
+| Security and Access Control Specification | v1.3 | Authoritative access control model. Budget entry locking decisions established in this document are incorporated in Section 10 of Security v1.3. |
+| UX and UI Specification | v1.4 | Authoritative UI design. This document adds functional depth to UX sections 5.2–5.9 without changing any UX decisions. |
+| Data Integration Specification | v1.5 | Authoritative ingestion pipeline. This document resolves OI-DI-06 (cost center hierarchy maintenance boundary). |
+
+# 2. Terminology
+
+All terms below are defined in the Domain Glossary (OBS_System_Context_and_Domain_Glossary_v1_9.docx). They are listed here as a quick reference for readers of this document. No synonym or alternative phrasing is permitted in code, API contracts, database schemas, UI labels, or documentation.
+
+| **Authoritative Term** | **Definition Summary** |
+| --- | --- |
+| **Budget line** | Single record: one cost center + one expense account + one planning period + one budget version. Has exactly one amount value. |
+| **Budget version** | Named snapshot of a budget. Multiple versions per fiscal year. One is always designated the active version. |
+| **Active version** | The version designated as the current official budget. Used for reporting and variance calculation unless overridden. |
+| **Budget target** | A planning goal set by Administrators at the cost center / expense account / planning period / budget version level. Not a hard cap. |
+| **Budget cycle** | The period during which budget entry is open for a cost center. Defined by Administrators. |
+| **Planning period** | A single calendar month within a fiscal year. The atomic unit of time for all data. |
+| **Fiscal year** | The twelve-month planning and reporting period. Currently aligned with the calendar year. |
+| **Cost center** | Primary organisational unit for budget ownership. Every budget line belongs to exactly one cost center. |
+| **Expense account** | General Ledger account code classifying expenditure type. Sourced from the accounting system — read-only in OBS. |
+| **Account hierarchy** | Parent-child rollup structure of expense accounts. Read-only in OBS. |
+| **Actuals** | Real expenditure imported from the accounting system. Read-only — never modified after import. |
+| **Variance** | Actuals minus budget for a given combination. Always calculated — never entered directly. |
+| **Vendor** | Third-party company or individual. Certain expense accounts require budget lines to be attributed to a named vendor. |
+| **Position** | Atomic unit of workforce planning. Personnel expense budget lines are derived from position records. |
+| **Standard permission grant** | ALL_WRITE or ALL_READ per cost center assignment. Controls non-personnel budget line write access. |
+| **Confidential data grant** | ALL_WRITE, ALL_READ, or ALL_NONE per cost center. Controls access to compensation and workforce data. |
+| **Administrator** | User with is_administrator = TRUE. Has full access to all modules and administrative functions. |
+| **System Modeler** | User with is_system_modeler = TRUE. Manages business rules configuration tables. |
+| **Dry-run** | Calculation without persistence. The calculation service always exposes dry-run endpoints — calculation and save are separate operations. |
+| **Overhead allocation** | Calculated read-only budget lines representing shared service costs spread across cost centers based on headcount and geography. |
+| **Compensation burden** | Employer tax and benefit costs (FICA, Medicare, state and federal taxes, unemployment) calculated on top of base salary. Applies in Workforce Planning only. |
+
+**Note on account mapping rules: **Source account codes from the accounting system are identical to expense account codes in OBS — no mapping transformation is required. The account mapping rules category in the calculation service configuration is not implemented. This is confirmed in Application Architecture Specification v3.6 Section 3.3.
+
+# 3. Budget Version Management
+
+A budget version is a named snapshot of a budget for a fiscal year. All budget lines, budget targets, and vendor attributions belong to exactly one budget version. Budget version management is an Administrator-only capability surfaced in the Administration module.
+
+## 3.1 Version Lifecycle States
+
+| **Status** | **Description** |
+| --- | --- |
+| **Draft** | The version is open for budget entry. Cost center owners with ALL_WRITE standard grant may create and edit budget lines. This is the default status upon creation. |
+| **Submitted** | One or more cost centers within the version have been submitted for Finance review. Budget entry for submitted cost centers is locked for non-Administrator users. Other cost centers in the same version may still be in Draft. |
+| **Approved** | The Finance approval workflow has approved the version. Defined in Functional Requirements: Finance Approval Workflow v1.2. |
+| **Rejected** | The Finance approval workflow has rejected the version. Defined in Functional Requirements: Finance Approval Workflow v1.2. |
+| **Archived** | The version has been soft-deleted by an Administrator. It is hidden from all non-Administrator users. Budget lines are retained in the PostgreSQL obs schema and remain accessible to Administrators. |
+
+## 3.2 Version Creation — Clone Only
+
+| **Decision: Budget version creation uses clone as the starting point. ****New budget versions are always created by cloning an existing version. The clone operation copies all budget lines, budget targets, and vendor attribution records from the source version into a new named version. The cloned version is created in Draft status regardless of the source version****'****s status.** |
+| --- |
+
+Clone operation rules:
+
+- Source version: any version in any status may be used as a clone source, including Archived versions (Administrators only).
+
+- The Administrator provides a name for the new version at clone time. The name must be unique within the fiscal year.
+
+- The clone is atomic — either all records copy successfully or none do. Partial clones are not permitted.
+
+- The new version is not automatically designated as the active version.
+
+- The clone event is written to the audit log with event_type BUDGET_VERSION_CLONED, capturing: source_version_id, new_version_id, fiscal_year, user_id, and timestamp.
+
+| **Claude Code Note — Budget version clone API** | **POST /api/v1/budget-versions/{source_version_id}/clone Request body: { name: string, fiscal_year: integer } The API copies obs.budget_lines, obs.budget_targets, and obs.vendor_line_items for the source version into new records with the new version_id. The operation must be executed as a single PostgreSQL transaction. On failure, roll back all inserts. Returns HTTP 201 with the new version record on success. Returns HTTP 409 if the name already exists for that fiscal year. Write the BUDGET_VERSION_CLONED audit event after successful transaction commit.** |
+| --- | --- |
+
+## 3.3 Version Naming and Renaming
+
+- Budget version names are free-form text, maximum 100 characters.
+
+- Names must be unique within a fiscal year. Uniqueness is enforced at the API layer.
+
+- An Administrator may rename any version (any status) at any time.
+
+- Rename generates audit event BUDGET_VERSION_RENAMED: version_id, old_name, new_name, user_id, timestamp.
+
+## 3.4 Active Version Designation
+
+- Exactly one version per fiscal year is designated as the active version at any given time.
+
+- Designation is an Administrator-only action available on the Budget Versions administration screen.
+
+- Setting a new active version requires a confirmation modal (UX and UI Specification v1.5 Section 9.2 pattern).
+
+- An Archived version may not be designated as the active version.
+
+- The active version designation generates audit event BUDGET_VERSION_ACTIVATED: version_id, fiscal_year, previously_active_version_id, user_id, timestamp.
+
+## 3.5 Version Archiving and Deletion
+
+Administrators may remove a budget version via two mechanisms:
+
+| **Mechanism** | **Behaviour** |
+| --- | --- |
+| **Archive (soft delete)** | Sets version status to Archived. Budget lines, targets, and vendor attributions are retained in the PostgreSQL obs schema. The version is hidden from all non-Administrator users, including the budget version selector in the Budget Planning module. The version remains accessible to Administrators in the Budget Versions administration screen. Reversible — an Administrator may restore an Archived version to Draft status. |
+| **Permanent deletion** | Hard-deletes the version record and all associated budget lines, budget targets, and vendor attribution records from the PostgreSQL obs schema. This operation is irreversible. A confirmation modal must warn the Administrator explicitly: ‘This will permanently delete the version and all associated budget data. This action cannot be undone.’ |
+
+Deletion constraints:
+
+- The active version may not be archived or permanently deleted. The Administrator must designate a different active version first. The API returns HTTP 409 if this constraint is violated.
+
+- A version with status Submitted or Approved may not be permanently deleted without first being set back to Draft by an Administrator.
+
+- Archive generates audit event BUDGET_VERSION_ARCHIVED. Permanent deletion generates audit event BUDGET_VERSION_DELETED: version_id, fiscal_year, version_name, user_id, timestamp.
+
+| **Claude Code Note — Version deletion API** | **DELETE /api/v1/budget-versions/{version_id}?mode=archive│permanent mode=archive: sets status=****'****Archived****'**** and is_visible_to_non_admins=FALSE on obs.budget_versions. Returns HTTP 200. mode=permanent: deletes obs.budget_versions, obs.budget_lines, obs.budget_targets, and obs.vendor_line_items for this version_id in a single transaction. Both modes: verify version is not active before executing — return HTTP 409 with message if it is. Write the appropriate audit event after successful operation.** |
+| --- | --- |
+
+# 4. Budget Target Management
+
+The budget target is a planning goal representing the expected or allocated spend for a specific combination of cost center, expense account, planning period, and budget version. It is not a hard cap — cost center owners may exceed the target for valid business reasons. The budget target is used to calculate variance-against-target, which drives mandatory commentary requirements during budget submission.
+
+## 4.1 Budget Target Granularity
+
+| **Decision: Budget target is stored at cost center / expense account / planning period / budget version. ****The budget target exists at the same level of granularity as a budget line: one target amount per cost center, expense account, planning period, and budget version. This allows per-account, per-month target variance display in the budget entry grid and in the Budget Summary screen. A cost center-level total target is always derived by summing all account-period target amounts for the cost center and version — it is never stored separately.** |
+| --- |
+
+The budget target is stored in a separate table (obs.budget_targets) rather than as a budget line, to clearly distinguish planning goals from budget amounts and to allow independent maintenance.
+
+## 4.2 Budget Target Maintenance
+
+- Administrators are the only users who may create, edit, or delete budget target amounts.
+
+- Budget targets may be set or changed at any time, including after cost center owners have begun budget entry.
+
+- Budget targets are associated with a budget version — when a version is cloned, all budget target records for that version are cloned into the new version.
+
+- Targets may be entered individually per account/period via the Administration module, or uploaded in bulk via a CSV/Excel file (same file format conventions as the existing ingestion pipeline: comma/tab/pipe auto-detected, first sheet or sheet named Data or Export for Excel).
+
+- A target amount of zero is a valid entry and is distinct from a missing (null) target. A null target means no target has been set for that account/period combination and no variance indicator is displayed.
+
+## 4.3 Budget Target Display
+
+The UX and UI Specification v1.5 Section 5.3.1 specifies a budget target indicator header row showing a single cost center total. That display remains unchanged. This specification adds:
+
+- Per-account target amounts are displayed as a read-only ‘Target’ column in the budget entry grid (displayed to all users who can see the grid, regardless of standard permission grant).
+
+- Per-account variance-against-target is displayed as a read-only ‘Vs. Target’ column adjacent to the Target column, showing the absolute and percentage difference between the budget line total and the target total for that account.
+
+- The cost center total displayed in the budget target indicator header is the sum of all account-period target amounts for the selected cost center, fiscal year, and budget version.
+
+- Amber highlighting applies to any account row where the absolute variance-against-target percentage exceeds 10% (consistent with the Budget Summary screen rule in UX spec Section 5.8).
+
+| **Claude Code Note — Budget target schema** | **obs.budget_targets table:   version_id     STRING NOT NULL  -- FK to obs.budget_versions   cost_center_id STRING NOT NULL   account_code   STRING NOT NULL   fiscal_year    INT NOT NULL   period_number  INT NOT NULL  -- 1 through 12   target_amount  DECIMAL(18,2)   created_at TIMESTAMP, updated_at TIMESTAMP, updated_by STRING   Primary key: (version_id, cost_center_id, account_code, fiscal_year, period_number) GET /api/v1/budget-targets/{cost_center_id}/{fiscal_year}/{version_id}   — returns all targets for cost center/year/version. PATCH /api/v1/budget-targets — bulk upsert.   Request body: array of { version_id, cost_center_id, account_code, fiscal_year, period_number, target_amount }. Write BUDGET_TARGET_UPDATED audit event on any change: version_id, cost_center_id, account_code, fiscal_year, period_number, old_amount, new_amount, user_id, timestamp.** |
+| --- | --- |
+
+# 5. Budget Line Entry
+
+This section defines the functional rules governing how budget lines are created, edited, validated, and saved. The UX and UI Specification v1.5 Sections 5.2–5.6 define the user interface for all of the behaviours described here. This section adds the data rules, API contracts, and acceptance criteria that underpin that interface.
+
+## 5.1 Budget Line Ownership Rules
+
+| **Rule** | **Detail** |
+| --- | --- |
+| **One budget line per combination** | A budget line is uniquely identified by: cost_center_id + account_code + fiscal_year + period_number + version_id. Duplicate combinations are rejected at the API layer (HTTP 409). |
+| **Non-personnel accounts** | Budget line amounts for non-personnel expense accounts are entered directly by users with ALL_WRITE standard grant. The API permits write access only for this account type. |
+| **Personnel expense accounts** | Budget line amounts for personnel expense accounts are derived from Workforce Planning data. No API endpoint permits direct write to these accounts from the Budget Planning module. The API returns HTTP 403 for any such attempt. |
+| **Overhead allocation accounts** | Budget line amounts for accounts designated as overhead allocation accounts are calculated by the overhead allocation service. No API endpoint permits direct write to these accounts. The API returns HTTP 403 for any such attempt. |
+| **Null vs zero** | A null budget line amount means no budget has been entered for that combination. A zero amount means the user has explicitly budgeted zero. The budget entry grid displays null as blank and zero as ‘0’. Both are valid states. |
+| **Annual amounts (budget year +1 and +2)** | For fiscal years beyond the current budget year, a single annual amount is entered per account. The API stores this as a single budget line with period_number = 0 to distinguish it from a monthly entry. |
+
+## 5.2 Validation Rules
+
+| **Field** | **Rule** | **API Response on Failure** |
+| --- | --- | --- |
+| **amount** | Numeric. May be null (unbudgeted) or a decimal value with up to two decimal places. Negative values are permitted (e.g., budget credits). Maximum absolute value: 999,999,999.99. | HTTP 422 — field: amount, message: ‘Amount must be a numeric value with up to two decimal places.’ |
+| **account_code** | Must exist in obs.account_hierarchy_nodes as an active leaf-level account. | HTTP 422 — field: account_code, message: ‘Account code not found or is not a leaf-level expense account.’ |
+| **cost_center_id** | Must exist in obs.cost_center_hierarchy_nodes as an active cost center. Requesting user must have a cost center access grant for this cost center. | HTTP 403 — if no access grant. HTTP 422 — if cost center does not exist. |
+| **version_id** | Must exist in obs.budget_versions with status = Draft. Requests against Submitted, Approved, Rejected, or Archived versions are rejected (except Administrators, who may write to Submitted versions). | HTTP 403 — message: ‘Budget version is not open for editing.’ |
+| **period_number** | Must be 1–12 for budget year. Must be 0 for budget year +1 and +2 (annual entry mode). | HTTP 422 — field: period_number, message: ‘Invalid period number for the selected fiscal year.’ |
+
+## 5.3 Bulk Save
+
+The budget entry grid Save operation submits all dirty rows in a single API call. The API processes each row independently and returns a per-row result. Partial success is permitted — successfully saved rows are committed; failed rows are returned with error detail and remain dirty in the frontend.
+
+| **Claude Code Note — Bulk save API** | **PUT /api/v1/budget-lines/bulk Request body: { version_id, cost_center_id, fiscal_year,   lines: [ { account_code, period_number, amount } ] } The API validates each line independently. Returns HTTP 207 (Multi-Status) with per-row success/error. Each saved budget line generates audit event BUDGET_LINE_SAVED: version_id, cost_center_id, account_code, fiscal_year, period_number, old_amount, new_amount, user_id, timestamp. The entire request is authenticated and cost-center-scoped in middleware before any line is processed. Do not generate one audit event per bulk call — generate one per line that changes.** |
+| --- | --- |
+
+# 6. Vendor Attribution
+
+Vendor attribution records the planned spend for a budget line broken down by named vendor. It applies only to expense accounts designated as requiring vendor attribution. This designation is configured in the expense account record by a System Modeler or Administrator.
+
+## 6.1 Vendor Attribution Rules
+
+- A vendor attribution record belongs to exactly one budget line (cost center + account + period + version).
+
+- Vendor name is free-form text, maximum 255 characters. There is no vendor master lookup or autocomplete.
+
+- Each vendor line item has one amount per planning period (12 amounts for budget year; one annual amount for budget year +1 and +2).
+
+- Multiple vendor line items may exist for the same account/period combination (e.g., multiple consultants charged to the same account).
+
+- The sum of all vendor line items for an account/period should equal the budget line amount for that account/period. A discrepancy generates a warning but does not block saving (UX spec Section 5.4.1).
+
+- Saving vendor line items is always a separate API call from the main grid Save. The two operations are independent.
+
+- Deleting a vendor line item that has amounts requires a confirmation prompt (UX spec Section 5.4.1).
+
+## 6.2 Vendor Attribution Access Control
+
+- Users with ALL_WRITE standard grant on the cost center may create, edit, and delete vendor line items.
+
+- Users with ALL_READ standard grant see vendor line items in read-only mode.
+
+- Vendor line items for personnel expense accounts do not exist — those accounts are read-only in the budget entry grid.
+
+## 6.3 Vendor Attribution Schema and API
+
+| **Claude Code Note — Vendor attribution schema and API** | **obs.vendor_line_items table:   vendor_line_id STRING NOT NULL (generated UUID)   version_id     STRING NOT NULL   cost_center_id STRING NOT NULL   account_code   STRING NOT NULL   fiscal_year    INT NOT NULL   vendor_name    STRING NOT NULL (max 255 chars)   period_number  INT NOT NULL (1–12 for budget year; 0 for annual)   amount         DECIMAL(18,2)   created_at TIMESTAMP, updated_at TIMESTAMP, updated_by STRING GET /api/v1/vendor-lines/{cost_center_id}/{account_code}/{fiscal_year}/{version_id}   — all vendor lines for the account. POST /api/v1/vendor-lines — create a new vendor line item. PATCH /api/v1/vendor-lines/{vendor_line_id} — update vendor name or amount. DELETE /api/v1/vendor-lines/{vendor_line_id} — delete a vendor line item. Audit events: VENDOR_LINE_CREATED, VENDOR_LINE_UPDATED, VENDOR_LINE_DELETED — capturing version_id, cost_center_id, account_code, vendor_name, user_id, timestamp.** |
+| --- | --- |
+
+# 7. Calculation Service Rules
+
+The calculation service is a logically distinct component within the backend API (Application Architecture Specification v3.6 Section 3.3). It evaluates proposed data changes against business rules stored in PostgreSQL configuration tables and returns recalculated figures without persisting data. This section defines the business rules the calculation service must implement for the Budget Planning module.
+
+**Scope of this section: **Compensation burden rate calculations apply exclusively within the Workforce Planning module and are specified in Functional Requirements: Workforce Planning v1.1. This section covers the Budget Planning calculation service rules: overhead allocation and aggregate/total derivation.
+
+## 7.1 Aggregate and Total Derivation
+
+- The Total column for each budget line row is the sum of all period amounts for that account/cost center/version combination. For budget year +1 and +2 (annual entry mode), the Total equals the single annual amount.
+
+- Account hierarchy group rows display the sum of all child account rows. This rollup is always computed server-side and returned in the API response — the frontend never independently derives aggregate values (UX spec Section 5.3.2 Claude Code note).
+
+- The budget total displayed in the budget target indicator header is the sum of all non-overhead, non-personnel account row totals plus all overhead allocation account totals plus all personnel expense account totals for the selected cost center, fiscal year, and budget version.
+
+- All aggregation is performed by the calculation service issuing direct PostgreSQL queries against the obs schema (Application Architecture Specification v3.6 Section 3.3).
+
+## 7.2 Overhead Allocation Calculation
+
+| **Decision: Overhead allocation produces read-only calculated budget lines. ****Shared service costs (e.g., rent, employee medical expense) are allocated across cost centers as calculated read-only budget lines. The Administrator configures the allocation rates in the Administration module. The calculation service derives the allocated amount for each cost center, expense account, and planning period from the headcount in that cost center and the applicable rate for that geography. These budget lines are not editable by any user — the API returns HTTP 403 for any write attempt.** |
+| --- |
+
+### 7.2.1 Overhead Allocation Rate Types
+
+| **Rate Type** | **Varies By** | **Example** |
+| --- | --- | --- |
+| **Universal rate** | Not geography-specific — same rate applies to all cost centers | Employee medical premium: $5,000 per employee per year regardless of location. |
+| **Geography-based rate** | Rate varies by the employee's state/geography | Rent: $800 per employee per month in State A; $1,200 per employee per month in State B. |
+
+Geography is determined at the employee level — the employee's state of residence as imported from the HR admin system. When computing the headcount for a cost center in a geography, the system counts the number of active employees assigned to that cost center whose state of residence matches the geography code for the applicable rate record.
+
+### 7.2.2 Overhead Allocation Formula
+
+**Allocated amount (per cost center / account / planning period):**
+
+| **allocated_amount = headcount_in_cost_center_for_geography × rate_for_geography_and_account** |
+| --- |
+
+- Headcount is the count of active employees in the cost center with state of residence matching the geography, as of the first day of the planning period.
+
+- For universal rates (no geography variation), the formula uses total active headcount in the cost center regardless of employee geography.
+
+- The rate is expressed as an amount per employee per planning period (monthly rate). Annual rates configured by the Administrator are divided by 12 to derive the monthly rate.
+
+- Allocated amounts are recalculated nightly by an Azure Functions timer-triggered job. They are also recalculated on demand when the Administrator modifies a rate or when employee headcount changes due to a Workforce Planning update.
+
+- Allocated amounts are stored as budget lines in obs.budget_lines with a flag is_calculated = TRUE and source = ‘overhead_allocation’. They are excluded from the editable rows in the budget entry grid.
+
+### 7.2.3 Overhead Allocation Rate Configuration
+
+Administrators configure overhead allocation rates in the Administration module. No file ingestion pipeline is used — rates are entered directly into configuration tables via the Administration module UI.
+
+- Each overhead allocation rate record defines: expense_account_code, geography_code (nullable — null means universal rate), amount_per_employee, rate_period (Monthly or Annual), effective_fiscal_year.
+
+- Rates are versioned by fiscal year — an Administrator configures rates per fiscal year. Rates do not carry forward automatically; they must be set each year.
+
+- Multiple rates may be defined for the same account across different geographies.
+
+- A universal rate (geography_code = null) and geography-specific rates may coexist for the same account. In that case, the geography-specific rate takes precedence for employees in that geography; the universal rate applies to employees whose geography does not match any specific rate.
+
+| **Claude Code Note — Overhead allocation schema** | **obs.overhead_allocation_rates table:   rate_id             STRING NOT NULL (generated UUID)   account_code        STRING NOT NULL   geography_code      STRING (nullable — null = universal)   amount_per_employee DECIMAL(18,2) NOT NULL   rate_period         ENUM(****'****Monthly****'****,****'****Annual****'****) NOT NULL   fiscal_year         INT NOT NULL   is_active           BOOLEAN NOT NULL DEFAULT TRUE   created_at TIMESTAMP, updated_at TIMESTAMP, updated_by STRING Overhead allocation budget lines stored in obs.budget_lines with   is_calculated=TRUE, source=****'****overhead_allocation****'****. Nightly recalculation: Azure Functions timer-triggered job ****'****overhead_allocation_refresh****'**** runs at 02:00 UTC. On-demand recalculation endpoint: POST /api/v1/overhead-allocation/recalculate — Administrator only. Audit events: OVERHEAD_RATE_CREATED, OVERHEAD_RATE_UPDATED, OVERHEAD_RATE_DELETED.** |
+| --- | --- |
+
+# 8. Budget Entry Locking
+
+This section establishes the budget entry locking decisions that are incorporated as the authoritative access control record in Security and Access Control Specification v1.4 Section 10.
+
+**Important: **Budget entry locking (defined in this section) is distinct from the read-only state that applies to Submitted budgets (defined in Section 9 of this document and UX spec Section 5.9). A lock is an explicit Administrative action applied independently of budget submission status.
+
+## 8.1 Lock Granularity
+
+| **Decision: Lock applies at cost center + fiscal year + budget version. ****A budget entry lock is applied to a specific combination of cost center, fiscal year, and budget version. Locking at this granularity means: all expense accounts and all planning periods within the locked combination become read-only. There is no account-group-level or planning-period-level locking.** |
+| --- |
+
+## 8.2 Lock Authority
+
+| **Decision: Administrators only may lock and unlock budget entries. ****Only users with is_administrator = TRUE may apply or remove a budget entry lock. Users with ALL_WRITE standard grant, System Modelers, and Report Developers may not apply or remove locks. This authority applies even for cost centers to which the Administrator has no explicit cost center access grant — the Administrator capability flag supersedes cost center access grants for locking operations.** |
+| --- |
+
+## 8.3 Locked-State Permissions
+
+| **User Type** | **Permitted Operations on a Locked Budget** |
+| --- | --- |
+| **Administrator** | Full read and write access. Locks do not restrict Administrator operations. |
+| **ALL_WRITE standard grant (non-Administrator)** | Read-only. No budget line creates, updates, or deletes. No vendor line item creates, updates, or deletes. No budget workflow submission. The Save button and all editable cells are suppressed in the UI. The API returns HTTP 403 for any write attempt. |
+| **ALL_READ standard grant** | Read-only — same as their normal access. No change in behaviour. |
+| **System Modeler / Report Developer** | Read access per their normal capability. No write access to budget lines (these capabilities do not include budget line write access regardless of lock state). |
+
+## 8.4 Lock Display
+
+- When a budget is locked, a lock status banner is displayed at the top of the Budget Planning module for that cost center, fiscal year, and version: ‘Budget entry locked — contact your Administrator to unlock.’
+
+- The lock icon is displayed in the budget version selector alongside the version name to indicate locked status.
+
+- The budget entry grid is rendered in read-only mode for all non-Administrator users when locked. No editable cells, no Save button, no Submit button.
+
+## 8.5 Lock Audit Events
+
+| **Event Type** | **Captured Fields** |
+| --- | --- |
+| **BUDGET_LOCK_APPLIED** | version_id, cost_center_id, fiscal_year, user_id (Administrator), timestamp |
+| **BUDGET_LOCK_REMOVED** | version_id, cost_center_id, fiscal_year, user_id (Administrator), timestamp |
+
+## 8.6 Lock Schema and API
+
+| **Claude Code Note — Budget entry lock schema and API** | **obs.budget_version_locks table:   lock_id        STRING NOT NULL (generated UUID)   version_id     STRING NOT NULL   cost_center_id STRING NOT NULL   fiscal_year    INT NOT NULL   is_locked      BOOLEAN NOT NULL DEFAULT FALSE   locked_at      TIMESTAMP (nullable)   locked_by      STRING (nullable — user_id of locking Administrator)   PRIMARY KEY (version_id, cost_center_id, fiscal_year) POST /api/v1/budget-version-locks — Administrator only.   Body: { version_id, cost_center_id, fiscal_year, action: ****'****lock****'****│****'****unlock****'**** }   Returns HTTP 200 on success. Returns HTTP 403 if caller is not an Administrator. The budget line PUT /bulk endpoint checks obs.budget_version_locks before processing — returns HTTP 403 if locked and caller is not Administrator. Write BUDGET_LOCK_APPLIED or BUDGET_LOCK_REMOVED audit event after successful lock state change.** |
+| --- | --- |
+
+# 9. Budget Submission
+
+Budget submission is in scope for the initial system per the decision recorded in Project Context Handoff v2.4 Section 3.3 and UX and UI Specification v1.5 Section 5.9. This section adds the functional rules and API contract that underpin the UX specification for submission.
+
+## 9.1 Submission Prerequisites
+
+The Submit button is enabled only when all of the following conditions are met:
+
+- The budget version status is Draft (not already Submitted, Approved, Rejected, or Archived).
+
+- The budget entry for the cost center is not locked (Section 8).
+
+- All mandatory commentary requirements are satisfied: every expense account whose budget amount varies from its budget target by more than 10% (absolute percentage) must have a non-empty commentary value (UX spec Section 5.8.2).
+
+- The user has ALL_WRITE standard grant or ALL_WRITE confidential data grant on the selected cost center, or is an Administrator.
+
+## 9.2 Submission Status Transitions
+
+| **From Status** | **To Status** | **Who / Trigger** |
+| --- | --- | --- |
+| **Draft** | Submitted | Cost center owner (ALL_WRITE standard or confidential grant) or Administrator, via Submit button. |
+| **Submitted** | Draft | Administrator only, via Budget Versions administration screen (reopen for editing). |
+| **Submitted** | Approved | Finance Reviewer — defined in Functional Requirements: Finance Approval Workflow v1.2. |
+| **Submitted** | Rejected | Finance Reviewer — defined in Functional Requirements: Finance Approval Workflow v1.2. |
+| **Approved / Rejected** | Draft | Administrator only — to correct and resubmit. |
+
+## 9.3 Post-Submission State
+
+- After submission: the budget entry grid and all workflow steps become read-only for all non-Administrator users.
+
+- A submitted status banner is displayed: ‘Budget submitted [date] — pending Finance approval.’ (UX spec Section 5.9).
+
+- Administrators may still write to a Submitted budget (e.g., to make corrections prior to Finance approval). The API enforces this exception: Administrator tokens bypass the Submitted status lock.
+
+- Reopening a submitted budget (setting status back to Draft) generates audit event BUDGET_REOPENED: version_id, cost_center_id, fiscal_year, user_id, timestamp.
+
+| **Claude Code Note — Submission API** | **POST /api/v1/budget-versions/{version_id}/submit Body: { cost_center_id, fiscal_year } Server-side validation before status change:   1. Verify caller has required grant or is Administrator.   2. Verify version status is Draft.   3. Verify no lock is applied for this cost_center_id + version_id + fiscal_year.   4. Verify all commentary requirements: query obs.budget_lines joined with obs.budget_targets;      any row where abs((budget_amount - target_amount) / target_amount) ****>**** 0.10 must have      non-null, non-empty commentary.   5. If any commentary requirement fails: return HTTP 422 with { non_compliant_accounts: [account_code, ...] }.   6. On pass: UPDATE obs.budget_versions SET status=****'****Submitted****'****, submitted_at=now(), submitted_by=user_id.   7. Write BUDGET_SUBMITTED audit event: version_id, cost_center_id, fiscal_year, submitted_by, timestamp. Do not rely on client-side commentary validation as the sole gate — server-side is authoritative.** |
+| --- | --- |
+
+# 10. Budget Entry Workflow
+
+The budget entry workflow is a guided three-step process defined in UX and UI Specification v1.5 Sections 5.7–5.9. This section defines the functional rules that govern workflow eligibility and step completion logic.
+
+## 10.1 Workflow Eligibility
+
+- The ‘Start Budget Entry’ workflow entry point is visible to users with ALL_WRITE standard grant or ALL_WRITE confidential data grant (or both) on the selected cost center, and to Administrators.
+
+- The workflow is not available if the budget version status is Submitted, Approved, Rejected, or Archived.
+
+- The workflow is not available if a budget entry lock is applied to the selected cost center + fiscal year + version combination.
+
+## 10.2 Workflow Step Rules
+
+| **Step** | **Name** | **Eligibility and Completion Rule** |
+| --- | --- | --- |
+| **1** | **Personnel Expenses** | Available only to users with ALL_WRITE confidential data grant or Administrators. If the user has ALL_WRITE standard grant only (no confidential grant), Step 1 is shown as ‘Not applicable’ and the workflow advances automatically to Step 2. Step 1 is marked complete when the user clicks ‘Next Step’ from the Workforce Planning module within the workflow context. |
+| **2** | **Non-Personnel Expenses** | Available to users with ALL_WRITE standard grant or Administrators. Step 2 is marked complete when the user clicks ‘Next Step’ from the budget entry grid within the workflow context. |
+| **3** | **Review and Submit** | Available after the applicable prior steps are complete. Navigates to the Budget Summary screen (UX spec Section 5.8). Step 3 is complete when the budget is successfully submitted via the Submit button. |
+
+Workflow state is held in React context (BudgetWorkflowContext) for the duration of the session. It is not persisted to the server. The workflow restarts from Step 1 if the user refreshes or starts a new session. (UX spec Section 5.7 Claude Code note.)
+
+# 11. Cost Center Hierarchy Maintenance
+
+This section resolves OI-DI-06 from the Data Integration Specification v1.6. It defines the maintenance boundary between the initial import-seeded cost center hierarchy and ongoing OBS-managed changes.
+
+## 11.1 Maintenance Boundary Decision
+
+| **Decision: After initial import, all cost center hierarchy maintenance is OBS-managed. ****The cost center hierarchy file import serves as the initial seed for the OBS cost center dimension. After the initial load, ongoing maintenance is performed within OBS by Administrators via the Administration module. Re-imports of the cost center hierarchy file are not supported after the initial seed — post-initial-import, the import pipeline is closed for cost center hierarchy changes; OBS is the sole write path.** |
+| --- |
+
+## 11.2 OBS-Managed Cost Center Operations
+
+All of the following operations are available to Administrators in the Administration module:
+
+| **Operation** | **Rules** |
+| --- | --- |
+| **Add a new cost center** | Create a new cost center with: cost_center_id (generated or Administrator-assigned), name, parent rollup node assignment, and is_active = TRUE. The new cost center is immediately available for budget entry and user assignment. |
+| **Rename a cost center** | Update the cost center name. The cost_center_id does not change. All existing budget lines and actuals records referencing this cost center are unaffected. |
+| **Move a cost center** | Reassign a cost center to a different parent rollup node in the hierarchy. The move takes effect immediately for reporting rollup purposes. Historical actuals and budget data remain associated with the cost center and roll up under the new parent going forward. |
+| **Deactivate a cost center** | Set is_active = FALSE. Deactivated cost centers are hidden from the cost center selector for non-Administrator users. Existing budget lines and actuals for a deactivated cost center are retained. Budget entry for a deactivated cost center is blocked — the API returns HTTP 409 for any budget line write attempt against an inactive cost center. |
+| **Add/rename/deactivate a rollup node** | Same operations available for parent rollup nodes in the hierarchy. |
+| **Bulk cost center upload** | Upload multiple new cost centers at once from a CSV or Excel file. See Section 11.3. |
+
+## 11.3 Bulk Cost Center Upload
+
+| **Decision: Bulk cost center upload via Administration module UI — direct upload, not pipeline. ****To support scenarios requiring many new cost centers at once (e.g., post-acquisition onboarding), Administrators may upload a CSV or Excel file of new cost centers directly through the Administration module UI. This upload is processed synchronously within the API — it does not go through the Azure Blob Storage landing zone or the Azure Functions ingestion pipeline.** |
+| --- |
+
+Bulk upload file format:
+
+| **Column** | **Required** | **Rules** |
+| --- | --- | --- |
+| **cost_center_id** | Optional | If provided, must be unique. If omitted, the system generates a UUID. Maximum 50 characters. |
+| **cost_center_name** | Required | Maximum 200 characters. Must be unique across all active cost centers. |
+| **parent_node_id** | Required | Must reference an existing active rollup node in obs.cost_center_hierarchy_nodes. |
+| **is_active** | Optional | Defaults to TRUE if omitted. Accepted values: TRUE, FALSE, 1, 0. |
+
+- CSV delimiter is auto-detected (comma, tab, or pipe). Excel: first sheet or sheet named Data or Export is read.
+
+- A preview of parsed records is displayed to the Administrator before commit, showing: count of valid records, count of invalid records, and a list of validation errors with row numbers.
+
+- The Administrator may choose to commit valid records only (skipping invalid rows) or cancel the entire upload.
+
+- Each successfully created cost center generates audit event COST_CENTER_CREATED: cost_center_id, cost_center_name, parent_node_id, source='bulk_upload', user_id, timestamp.
+
+| **Claude Code Note — Bulk cost center upload API** | **POST /api/v1/cost-centers/bulk-upload — Administrator only. Accepts multipart/form-data with file field. Step 1: Parse and validate all rows. Return HTTP 200 with preview payload:   { valid_count, invalid_count, errors: [{ row, field, message }],     preview: [{ cost_center_id, cost_center_name, parent_node_id }] } Step 2 (after Administrator confirms):   POST /api/v1/cost-centers/bulk-upload/commit   Body: { commit_mode: ****'****valid_only****'**** │ ****'****cancel****'**** }   Inserts all valid records into obs.cost_center_hierarchy_nodes in a single transaction.   Returns HTTP 201 with created_count. Write one COST_CENTER_CREATED audit event per successfully created cost center.** |
+| --- | --- |
+
+# 12. Administration Module — Budget Planning Screens
+
+This section defines the Administration module screens that support Budget Planning. These screens are accessible only to Administrators and are surfaced in the Administration module (UX spec Section 8).
+
+## 12.1 Budget Versions Screen
+
+- Lists all budget versions for the selected fiscal year, including Archived versions (visible to Administrators only).
+
+- Displayed columns: version name, status, is_active indicator, created date, last modified date, submitted date (if applicable), is_locked indicator.
+
+- Available actions per row: Rename, Clone, Set as Active, Archive, Permanent Delete, Lock/Unlock.
+
+- Permanently deleted versions are removed from this list immediately.
+
+## 12.2 Budget Targets Screen
+
+- Displays budget target amounts per cost center / expense account / planning period for the selected fiscal year and budget version.
+
+- Inline editing of target amounts — changes auto-save on blur (same pattern as UX spec Section 8 Administration module interactions).
+
+- Bulk upload option available: Administrator may upload a CSV/Excel file of target amounts. Format: cost_center_id, account_code, fiscal_year, period_number (1–12), target_amount.
+
+## 12.3 Overhead Allocation Rates Screen
+
+- Lists all overhead allocation rate records for the selected fiscal year.
+
+- Displayed columns: expense account, geography code (blank = universal), amount per employee, rate period, is_active.
+
+- Available actions: Add rate, Edit rate, Deactivate rate.
+
+- Changes to rates trigger an on-demand overhead allocation recalculation for the affected fiscal year.
+
+## 12.4 Cost Center Management Screen
+
+- Lists all cost centers (active and inactive) in hierarchical view.
+
+- Available actions: Add cost center, Rename, Move (reassign parent), Deactivate/Reactivate.
+
+- ‘Bulk Upload’ button opens file upload dialog for bulk cost center creation (Section 11.3).
+
+# 13. PostgreSQL Schema Additions
+
+This section consolidates all new PostgreSQL tables and column additions required by this specification. Existing table schemas defined in the Data Integration Specification v1.6 and Application Architecture Specification v3.6 are not repeated here — only additions and amendments are listed.
+
+## 13.1 New Tables
+
+| **Table** | **Purpose** |
+| --- | --- |
+| **obs.budget_targets** | Stores per-cost-center / account / period / version budget target amounts. Defined in Section 4.3. |
+| **obs.vendor_line_items** | Stores per-vendor, per-period attribution amounts for designated expense accounts. Defined in Section 6.3. |
+| **obs.overhead_allocation_rates** | Stores Administrator-configured overhead allocation rates by account and geography. Defined in Section 7.2.3. |
+| **obs.budget_version_locks** | Stores lock state per cost center + fiscal year + version. Defined in Section 8.6. |
+
+## 13.2 Amendments to Existing Tables
+
+| **Table** | **Column Addition** | **Detail** |
+| --- | --- | --- |
+| **obs.budget_versions** | status ENUM('Draft','Submitted','Approved','Rejected','Archived') | Default 'Draft'. Governs edit permissions and display. Defined in Section 3.1. |
+| **obs.budget_versions** | is_visible_to_non_admins BOOLEAN | Default TRUE. Set to FALSE when status = Archived. Controls version selector visibility. |
+| **obs.budget_versions** | submitted_at TIMESTAMP | Nullable. Set when status transitions to Submitted. |
+| **obs.budget_versions** | submitted_by STRING | Nullable. user_id of submitting user. |
+| **obs.budget_lines** | is_calculated BOOLEAN | Default FALSE. TRUE for overhead allocation and personnel expense derived lines. |
+| **obs.budget_lines** | source ENUM('user_entry','overhead_allocation','workforce_planning') | Identifies how the budget line was populated. |
+| **obs.budget_lines** | commentary STRING | Nullable. Free-form text. Used for variance-against-target explanations on the Budget Summary screen. |
+
+# 14. Audit Events
+
+All events below are written to the OBS audit log (PostgreSQL — append-only, enforced by a BEFORE UPDATE OR DELETE trigger). All events capture a minimum of: event_type, user_id, timestamp, and the entity IDs listed per event. The audit log schema is defined in Security and Access Control Specification v1.4.
+
+| **Event Type** | **Additional Captured Fields** |
+| --- | --- |
+| **BUDGET_LINE_SAVED** | version_id, cost_center_id, account_code, fiscal_year, period_number, old_amount, new_amount |
+| **BUDGET_VERSION_CLONED** | source_version_id, new_version_id, fiscal_year, new_version_name |
+| **BUDGET_VERSION_RENAMED** | version_id, old_name, new_name |
+| **BUDGET_VERSION_ACTIVATED** | version_id, fiscal_year, previously_active_version_id |
+| **BUDGET_VERSION_ARCHIVED** | version_id, fiscal_year, version_name |
+| **BUDGET_VERSION_DELETED** | version_id, fiscal_year, version_name |
+| **BUDGET_TARGET_UPDATED** | version_id, cost_center_id, account_code, fiscal_year, period_number, old_amount, new_amount |
+| **VENDOR_LINE_CREATED** | version_id, cost_center_id, account_code, vendor_name, fiscal_year, period_number, amount |
+| **VENDOR_LINE_UPDATED** | vendor_line_id, version_id, cost_center_id, account_code, vendor_name, old_amount, new_amount |
+| **VENDOR_LINE_DELETED** | vendor_line_id, version_id, cost_center_id, account_code, vendor_name |
+| **OVERHEAD_RATE_CREATED** | rate_id, account_code, geography_code, amount_per_employee, fiscal_year |
+| **OVERHEAD_RATE_UPDATED** | rate_id, account_code, old_amount, new_amount, old_geography_code, new_geography_code |
+| **OVERHEAD_RATE_DELETED** | rate_id, account_code, geography_code, fiscal_year |
+| **BUDGET_LOCK_APPLIED** | version_id, cost_center_id, fiscal_year |
+| **BUDGET_LOCK_REMOVED** | version_id, cost_center_id, fiscal_year |
+| **BUDGET_SUBMITTED** | version_id, cost_center_id, fiscal_year, submitted_by |
+| **BUDGET_REOPENED** | version_id, cost_center_id, fiscal_year |
+| **COST_CENTER_CREATED** | cost_center_id, cost_center_name, parent_node_id, source ('manual'│'bulk_upload') |
+| **COST_CENTER_RENAMED** | cost_center_id, old_name, new_name |
+| **COST_CENTER_MOVED** | cost_center_id, old_parent_node_id, new_parent_node_id |
+| **COST_CENTER_DEACTIVATED** | cost_center_id, cost_center_name |
+| **COST_CENTER_REACTIVATED** | cost_center_id, cost_center_name |
+
+# 15. Acceptance Criteria
+
+Each criterion below must be verified by automated test or documented manual test procedure before the Budget Planning module is considered complete. Criteria from the UX and UI Specification v1.5 Section 5.6 (AC-UP-BP-01 through AC-UP-BP-19) remain in force and are not repeated here — this section adds the functional and data-layer criteria.
+
+## 15.1 Budget Line Entry
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-BP-BL-01** | A budget line with a duplicate combination of cost_center_id + account_code + fiscal_year + period_number + version_id is rejected by the API with HTTP 409. |
+| **AC-BP-BL-02** | An attempt to write a budget line for a personnel expense account via the Budget Planning API returns HTTP 403. |
+| **AC-BP-BL-03** | An attempt to write a budget line for an overhead allocation account returns HTTP 403. |
+| **AC-BP-BL-04** | A null budget line amount is stored as NULL in obs.budget_lines and displayed as blank in the grid. A zero amount is stored as 0 and displayed as ‘0’. |
+| **AC-BP-BL-05** | Amounts with more than two decimal places are rejected with HTTP 422. |
+| **AC-BP-BL-06** | An invalid account_code (not in obs.account_hierarchy_nodes or not a leaf-level account) is rejected with HTTP 422. |
+| **AC-BP-BL-07** | A budget line write against an inactive cost center returns HTTP 409. |
+| **AC-BP-BL-08** | The bulk save API returns HTTP 207 with per-row success/error. Successfully saved rows are committed. Failed rows return error detail. The response does not mix HTTP 200 with partial failures. |
+| **AC-BP-BL-09** | Each successfully saved budget line generates a BUDGET_LINE_SAVED audit event with old_amount and new_amount. |
+| **AC-BP-BL-10** | For fiscal year +1 and +2, the API accepts period_number = 0 (annual entry) and rejects period_number 1–12. |
+
+## 15.2 Budget Version Management
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-BP-VER-01** | Cloning a version copies all obs.budget_lines, obs.budget_targets, and obs.vendor_line_items for the source version to the new version. The new version status is Draft. |
+| **AC-BP-VER-02** | The clone operation is atomic. If any insert fails, no records are committed and the API returns an error. |
+| **AC-BP-VER-03** | Cloning to a version name that already exists for the fiscal year returns HTTP 409. |
+| **AC-BP-VER-04** | A renamed version generates a BUDGET_VERSION_RENAMED audit event with old_name and new_name. |
+| **AC-BP-VER-05** | Setting a new active version generates a BUDGET_VERSION_ACTIVATED audit event capturing the previously_active_version_id. |
+| **AC-BP-VER-06** | An Archived version does not appear in the budget version selector for non-Administrator users. |
+| **AC-BP-VER-07** | Attempting to archive or permanently delete the active version returns HTTP 409. |
+| **AC-BP-VER-08** | Permanent deletion removes obs.budget_versions, all obs.budget_lines, obs.budget_targets, and obs.vendor_line_items for the version in a single transaction. The record does not appear in any API response after deletion. |
+| **AC-BP-VER-09** | An archived version can be restored to Draft status by an Administrator. |
+
+## 15.3 Budget Target Management
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-BP-TGT-01** | Only Administrator tokens may create, update, or delete budget target records. Non-Administrator write attempts return HTTP 403. |
+| **AC-BP-TGT-02** | A null target_amount means no target is set. The Target and Vs. Target columns display blank (not zero) for null target rows. |
+| **AC-BP-TGT-03** | A zero target_amount is a valid entry and displays as ‘0’ in the Target column. |
+| **AC-BP-TGT-04** | The Vs. Target column in the budget entry grid reflects the server-returned variance_pct — it is not derived in the frontend. |
+| **AC-BP-TGT-05** | Amber highlighting applies to account rows where abs(variance_pct) > 10. The 10% threshold is evaluated server-side and returned in the API response. |
+| **AC-BP-TGT-06** | The cost center total target displayed in the budget target indicator header is the sum of all account-period target amounts and is updated server-side on target or budget line change. |
+| **AC-BP-TGT-07** | Each budget target change generates a BUDGET_TARGET_UPDATED audit event with old_amount and new_amount. |
+| **AC-BP-TGT-08** | Bulk target upload correctly associates uploaded amounts with the specified cost_center_id, account_code, fiscal_year, period_number, and version_id. |
+
+## 15.4 Vendor Attribution
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-BP-VA-01** | Vendor line items may only be created for expense accounts flagged as requiring vendor attribution. Attempts for other accounts return HTTP 403. |
+| **AC-BP-VA-02** | Vendor name exceeding 255 characters is rejected with HTTP 422. |
+| **AC-BP-VA-03** | The vendor side panel Save is a separate API call from the main grid Save. Saving vendor lines does not trigger a main grid save and vice versa. |
+| **AC-BP-VA-04** | Deleting a vendor line item generates a VENDOR_LINE_DELETED audit event. |
+| **AC-BP-VA-05** | A discrepancy between the sum of vendor line items and the budget line amount generates a warning displayed in the vendor side panel but does not block the save operation. |
+| **AC-BP-VA-06** | Users with ALL_READ standard grant see vendor line items in read-only mode. No create, update, or delete actions are available. |
+
+## 15.5 Overhead Allocation
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-BP-OA-01** | Overhead allocation budget lines are stored in obs.budget_lines with is_calculated = TRUE and source = 'overhead_allocation'. |
+| **AC-BP-OA-02** | An attempt to write to an overhead allocation budget line returns HTTP 403 for all users including Administrators. |
+| **AC-BP-OA-03** | The overhead allocation formula correctly multiplies the count of active employees in the cost center for the applicable geography by the rate for that geography and account. |
+| **AC-BP-OA-04** | For universal rates (geography_code = NULL), total active headcount in the cost center is used regardless of employee geography. |
+| **AC-BP-OA-05** | When a geography-specific rate and a universal rate exist for the same account, the geography-specific rate takes precedence for employees in that geography. |
+| **AC-BP-OA-06** | Modifying an overhead allocation rate triggers a recalculation for the affected fiscal year and updates obs.budget_lines for all affected cost centers. |
+| **AC-BP-OA-07** | Annual rates are divided by 12 to produce monthly allocated amounts. Rounding is to two decimal places. |
+| **AC-BP-OA-08** | Each overhead rate change generates the appropriate audit event (OVERHEAD_RATE_CREATED, OVERHEAD_RATE_UPDATED, or OVERHEAD_RATE_DELETED). |
+
+## 15.6 Budget Entry Locking
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-BP-LOCK-01** | Only Administrator tokens may apply or remove a budget entry lock. Non-Administrator lock attempts return HTTP 403. |
+| **AC-BP-LOCK-02** | When a lock is applied, the budget line bulk save API returns HTTP 403 for all non-Administrator users attempting to write to the locked cost center + fiscal year + version combination. |
+| **AC-BP-LOCK-03** | Administrator tokens bypass the lock check — Administrators may write budget lines to a locked combination. |
+| **AC-BP-LOCK-04** | Applying a lock generates a BUDGET_LOCK_APPLIED audit event. Removing a lock generates a BUDGET_LOCK_REMOVED audit event. |
+| **AC-BP-LOCK-05** | The lock status banner is displayed in the Budget Planning module for the locked cost center + fiscal year + version for all non-Administrator users. |
+| **AC-BP-LOCK-06** | The Submit button is suppressed in the UI and blocked at the API for a locked budget (non-Administrator users). |
+
+## 15.7 Budget Submission
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-BP-SUB-01** | The submission API validates all mandatory commentary server-side before changing version status. If any account with abs(variance_pct) > 10 has null or empty commentary, the API returns HTTP 422 with the list of non-compliant account_codes. |
+| **AC-BP-SUB-02** | A successful submission changes the version status to Submitted and writes a BUDGET_SUBMITTED audit event. |
+| **AC-BP-SUB-03** | After submission, the budget line bulk save API returns HTTP 403 for all non-Administrator users. |
+| **AC-BP-SUB-04** | Administrator tokens bypass the Submitted status check — Administrators may write budget lines to a Submitted version. |
+| **AC-BP-SUB-05** | Reopening a Submitted budget (setting status back to Draft) generates a BUDGET_REOPENED audit event. |
+| **AC-BP-SUB-06** | The submission API returns HTTP 409 if a lock is applied to the cost center + fiscal year + version being submitted. |
+
+## 15.8 Cost Center Hierarchy Maintenance
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-BP-CCH-01** | A new cost center created via the Administration module is immediately visible in the cost center selector for users with an appropriate cost center access grant. |
+| **AC-BP-CCH-02** | Moving a cost center to a new parent rollup node is reflected immediately in the cost center hierarchy display. Existing budget lines and actuals records are unaffected. |
+| **AC-BP-CCH-03** | An attempt to write a budget line for a deactivated cost center returns HTTP 409. |
+| **AC-BP-CCH-04** | The bulk cost center upload preview returns the count of valid and invalid records and a list of validation errors with row numbers before commit. |
+| **AC-BP-CCH-05** | Bulk upload in commit_mode='valid_only' inserts all valid rows and skips invalid rows in a single transaction. |
+| **AC-BP-CCH-06** | Each successfully created cost center (individual or bulk) generates a COST_CENTER_CREATED audit event with source = 'manual' or 'bulk_upload'. |
+| **AC-BP-CCH-07** | All cost center hierarchy change operations generate the appropriate audit event (COST_CENTER_RENAMED, COST_CENTER_MOVED, COST_CENTER_DEACTIVATED, COST_CENTER_REACTIVATED). |
+
+# 16. Open Items
+
+| **OI-BP-01 — Security and Access Control Specification v1.2 amendment — RESOLVED**** Security and Access Control Specification v1.2 was issued. Section 10 of that specification (Budget Entry Locking) fully specifies the locking decisions established in Functional Requirements: Budget Planning v1.0 Sections 8.1–8.6: lock granularity (cost center + fiscal year + budget version), lock authority (Administrators only), locked-state permissions (fully read-only for non-Administrators, Administrators bypass), lock audit events (BUDGET_LOCK_APPLIED, BUDGET_LOCK_REMOVED), lock schema (obs.budget_version_locks), and lock API (POST /api/v1/budget-version-locks). Acceptance criteria AC-LOCK-01 through AC-LOCK-06 added. The Security and Access Control Specification subsequently reached v1.3, which added the Finance Reviewer capability flag. The locking specification in Section 10 remains current and in force in v1.3.** |
+| --- |
+
+| **OI-BP-02 — Application Architecture Specification — account mapping rules note — RESOLVED**** Application Architecture Specification v3.2 was issued. Section 3.3 (Calculation Service) was amended to remove account mapping rules from the implemented rule types list. The specification now explicitly states that source account codes are identical to OBS expense account codes and no mapping transformation is required. A Claude Code note was added instructing that no account_mappings configuration table should be implemented. The Architecture Specification subsequently reached v3.6; the account mapping exclusion remains in force.** |
+| --- |
+
+| **OI-BP-03 — Domain Glossary v1.5 — budget target definition — RESOLVED**** Domain Glossary v1.5 was issued. The budget target entry was updated with the definition established by this specification: a planning goal set by Administrators at the cost center / expense account / planning period / budget version level. Not a hard cap — users are not blocked from exceeding a target, but advisory indicators are shown. The Glossary subsequently reached v1.9; the budget target definition remains current and in force.** |
+| --- |
+
+All open items are now resolved. No outstanding items remain in this specification.
+
+# 17. Document Control
+
+| **Version** | **Date** | **Author** | **Change Summary** |
+| --- | --- | --- | --- |
+| 1.0 | Draft | TBD | Initial version — budget line entry, budget version management, budget target management, vendor attribution, overhead allocation calculation rules, budget entry locking (resolves Security spec Section 10 placeholder), budget submission, budget entry workflow, cost center hierarchy maintenance boundary (resolves OI-DI-06), Delta Lake schema additions, audit events, acceptance criteria. |
+| 1.1 | Draft | TBD | Section 16 Open Items: all three open items closed. OI-BP-01 — Security and Access Control Specification v1.2 issued incorporating budget entry locking decisions; resolved. OI-BP-02 — Application Architecture Specification v3.2 issued removing account mapping rules from calculation service implemented rule types; resolved. OI-BP-03 — Domain Glossary v1.5 issued with budget target definition; resolved. Depends-on references and related documents updated to current specification versions. |
+| 1.1 — Full Restatement | Draft | TBD | Full restatement incorporating all content from v1.0 through v1.1. All 17 sections present in full. Depends-on references updated to Architecture v3.5, Glossary v1.9, Security v1.3, UX v1.4, Data Integration v1.5. Supersedes all prior versions. |
+| 1.1 — Full Restatement (platform-aligned) | Draft | Claude | Databricks-free platform cascade aligned to Architecture Spec v3.6 (no functional-requirement content changed). Section 13 heading changed from "Delta Lake Schema Additions" to "PostgreSQL Schema Additions"; intro reworded to PostgreSQL. Abstract column types in all Claude Code Notes (STRING, INT, DECIMAL, BOOLEAN, TIMESTAMP, ENUM) preserved unchanged. Section 14 audit-log reference changed to "PostgreSQL — append-only, enforced by a BEFORE UPDATE OR DELETE trigger." Data-store references ("retained in Delta Lake", "single Delta Lake transaction", business-rule configuration tables) changed to the PostgreSQL obs schema. Aggregation changed from Databricks SQL endpoints to direct PostgreSQL queries; overhead nightly recalculation and bulk cost-center upload references changed from Databricks Workflow to Azure Functions. Depends-on and pointers updated to Architecture v3.6, Security v1.4, UX/UI v1.5, Data Integration v1.6. |
+| 1.1 — Full Restatement (errata) | Draft | Claude | Version-reference corrections per Specification Consistency & Errata Report v1.0 (in-place errata; no technical content changed). Active references in the depends-on header, relationship/related-documents lists, and instructional cross-references updated to current versions: System Context and Domain Glossary v1.9 → v1.11; Functional Requirements: Workforce Planning v1.0 → v1.1; Data Integration Specification v1.5 → v1.6; In-Application Notification Mechanism Specification v1.0 → v1.1; Security and Access Control Specification v1.3 → v1.4; UX and UI Specification v1.4 → v1.5; Project Context Handoff v2.3 → v2.4 (as applicable to this document). Historical Document Control rows and open-item resolution narratives describing past events are unchanged. |
+
+**Related Documents**
+
+- OPEX Budgeting System — System Context and Domain Glossary v1.11
+
+- OPEX Budgeting System — Application Architecture Specification v3.6
+
+- OPEX Budgeting System — Security and Access Control Specification v1.4
+
+- OPEX Budgeting System — UX and UI Specification v1.5
+
+- OPEX Budgeting System — Data Integration Specification v1.6
+
+- OPEX Budgeting System — In-Application Notification Mechanism Specification v1.1
+
+- OPEX Budgeting System — Functional Requirements: Workforce Planning v1.1
+
+- OPEX Budgeting System — Functional Requirements: Reporting v1.1
+
+- OPEX Budgeting System — Functional Requirements: Finance Approval Workflow v1.2
+
+- OPEX Budgeting System — Project Context Handoff v2.4
+
+OBS_Functional_Requirements_Budget_Planning_v1_1_Full.docx Page of
+
+Page  of

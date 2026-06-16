@@ -1,0 +1,610 @@
+OPEX Budgeting System  —  Functional Requirements: Finance Approval Workflow**	CONFIDENTIAL | DRAFT**
+
+**OPEX Budgeting System**
+
+**Functional Requirements: Finance Approval Workflow**
+
+*Version 1.2 — Full Restatement*
+
+*OBS_Functional_Requirements_Finance_Approval_Workflow_v1_2_Full.docx*
+
+| **Document title** | **Functional Requirements: Finance Approval Workflow** |
+| --- | --- |
+| **System** | OPEX Budgeting System (OBS) |
+| **Version** | 1.2 — Full Restatement |
+| **Status** | For Review |
+| **Audience** | Development Team, Technical Leads, Project Stakeholders |
+| **Depends on** | OBS Functional Requirements: Budget Planning v1.1; OBS Security and Access Control Specification v1.4; OBS Application Architecture Specification v3.6; OBS UX and UI Specification v1.5; OBS System Context and Domain Glossary v1.11; OBS In-Application Notification Mechanism Specification v1.1 |
+
+| ***Full Restatement Notice: This document is a full restatement of Functional Requirements: Finance Approval Workflow incorporating all content from v1.0 through v1.2. It supersedes all prior versions. All sections (1–15) are present in full — there is no need to consult any prior version file.*** |
+| --- |
+
+# 1. Purpose and Scope
+
+This document specifies the functional requirements for the Finance Approval Workflow — the Finance-side process by which submitted cost center budgets are reviewed and either approved or rejected by authorised Finance Reviewers. It is an extension of the Budget Planning functional requirements and resolves the deferred Finance-side approval workflow item recorded in the Project Context Handoff.
+
+## 1.1 Relationship to Other Specifications
+
+This specification depends on and must be read alongside the following documents. All terminology matches the System Context and Domain Glossary v1.11 exactly.
+
+| **Document** | **Version** | **Relationship** |
+| --- | --- | --- |
+| Functional Requirements: Budget Planning | v1.1 | Parent specification. Budget submission (Section 9), version status model (Section 3.1), obs.budget_versions schema, submission API, and audit events BUDGET_SUBMITTED and BUDGET_REOPENED. This specification extends that model. |
+| Security and Access Control Specification | v1.3 | Defines capability flag model, cost center permission framework, obs.users schema, and the is_finance_reviewer flag. v1.3 resolves OI-FAW-02 and is the current authoritative version. |
+| Application Architecture Specification | v3.6 | Defines API patterns, audit log structure, PostgreSQL conventions, performance targets, Finance Review module frontend entry, and notification service responsibilities. Current authoritative version. |
+| UX and UI Specification | v1.4 | Defines application shell, navigation model, MUI component standards, interaction patterns, Finance Review module screen specifications, and notification bell/inbox. Current authoritative version. |
+| System Context and Domain Glossary | v1.9 | Authoritative terminology reference. Includes Finance Reviewer, finance review record, approval reason, rejection reason, and all notification terms. Current authoritative version. |
+| In-Application Notification Mechanism Specification | v1.0 | Defines the notification bell component, inbox panel, obs.notifications schema, notification service API, and all FAW notification touchpoints. Resolves OI-FAW-01 and OI-WP-03. |
+| Project Context Handoff | v2.3 | Records all design decisions and open item resolutions across the project. |
+
+## 1.2 Scope
+
+This specification covers:
+
+- The is_finance_reviewer capability flag — definition, grant authority, and access model.
+
+- Finance Reviewer cost center scope — how Finance Reviewers are assigned cost center access, consistent with the existing cost center assignment model.
+
+- Finance Review module — a new top-level module accessible to Finance Reviewers and Administrators. Navigation item visibility rules and module entry point.
+
+- Approval queue — the Finance Reviewer's view of all cost center submissions pending review within their assigned scope.
+
+- Review record — the data structure and status model that tracks the approval or rejection of each cost center submission.
+
+- Approve action — status transition, mandatory approval reason, audit event, and downstream effects.
+
+- Reject action — status transition, mandatory rejection reason, audit event, and downstream effects.
+
+- Budget version status resolution — rules governing when a budget version transitions from Submitted to Approved or Rejected.
+
+- In-application notification touchpoints — fully implementable per In-Application Notification Mechanism Specification v1.1.
+
+- PostgreSQL schema additions and API contracts — all new and modified tables and endpoints.
+
+- Acceptance criteria — testable conditions for all functional requirements in this document.
+
+This specification does not cover:
+
+- Budget submission by cost center owners — fully specified in Functional Requirements: Budget Planning v1.1 Section 9.
+
+- Budget entry locking — specified in Functional Requirements: Budget Planning v1.1 Section 8 and Security and Access Control Specification v1.4 Section 10.
+
+- Re-opening a rejected or approved budget for editing — Administrator action; specified in Functional Requirements: Budget Planning v1.1 Section 9.2.
+
+- Report definition authoring — covered by OI-RPT-01; resolved in UX and UI Specification v1.5 Section 7.6.
+
+# 2. New Terms
+
+The following terms are introduced by this specification. They have been added to the System Context and Domain Glossary v1.11.
+
+| **Term** | **Definition** |
+| --- | --- |
+| **Finance Reviewer** | A user with is_finance_reviewer = TRUE. Authorised to review, approve, and reject submitted cost center budgets within their assigned cost center scope. |
+| **Finance review record** | A record in obs.finance_review_records tracking the review status and outcome for a specific cost center submission. Scoped to: version_id + cost_center_id + fiscal_year. |
+| **Approval reason** | A mandatory free-form text field provided by a Finance Reviewer when approving a cost center submission. Maximum 2,000 characters. |
+| **Rejection reason** | A mandatory free-form text field provided by a Finance Reviewer when rejecting a cost center submission. Maximum 2,000 characters. |
+
+# 3. Finance Reviewer Capability
+
+## 3.1 Capability Flag
+
+The Finance Reviewer capability is conferred by a boolean flag, is_finance_reviewer, on the obs.users record. This flag follows all existing patterns established for is_system_modeler and is_report_developer in Security and Access Control Specification v1.4 Section 3.
+
+| **Property** | **Value** |
+| --- | --- |
+| Flag name | is_finance_reviewer |
+| Column type | BOOLEAN NOT NULL DEFAULT FALSE |
+| Table | obs.users |
+| Grant authority | Administrator only — no other user type may set or remove this flag. |
+| Default on record creation | FALSE |
+| Independence | Additive and independent of all other flags. A user may hold is_finance_reviewer simultaneously with is_system_modeler or is_report_developer. An Administrator has implicit Finance Reviewer capabilities and does not require this flag. |
+
+## 3.2 Finance Reviewer Access Model
+
+A Finance Reviewer's access to cost center data is scoped by cost center assignments — the same assignment mechanism used for all non-Administrator users (Security and Access Control Specification v1.4 Section 4). The is_finance_reviewer flag confers the right to perform approval actions on submitted budgets; it does not implicitly grant access to any cost center data.
+
+The following rules govern Finance Reviewer access:
+
+- A Finance Reviewer must be assigned cost centers or cost center rollups by an Administrator to see any submitted budgets in the Finance Review module.
+
+- Cost center assignment for Finance Reviewers uses the existing obs.user_cost_center_grants and obs.user_rollup_grants tables. No new assignment tables are required.
+
+- Finance Reviewers only require ALL_READ standard grant on assigned cost centers to perform approval and rejection actions. ALL_WRITE standard grant is not required and must not be granted solely to enable the approval workflow.
+
+- Finance Reviewers with ALL_NONE confidential grant on a cost center may review and act on budget submissions for that cost center — approval actions do not expose compensation data. Compensation data visibility is governed by confidential grant as specified.
+
+- A Finance Reviewer with no cost center assignments has no data access in the Finance Review module and sees the empty state message defined in Section 5.4.
+
+- An Administrator has implicit Finance Reviewer access to all cost centers and sees all submitted budgets regardless of assignments.
+
+| **Claude Code Note — Finance Reviewer flag enforcement** | **obs.users schema: ALTER TABLE obs.users ADD COLUMN is_finance_reviewer BOOLEAN NOT NULL DEFAULT FALSE; Authorization middleware evaluates is_finance_reviewer flag for all Finance Review module routes. Route guard: is_administrator = TRUE OR is_finance_reviewer = TRUE — otherwise HTTP 403. Cost center scope for Finance Review routes is resolved from obs.user_cost_center_grants and obs.user_rollup_grants using the same resolution order defined in Security and Access Control Specification v1.4 Section 4.3.3. Finance Reviewers do not require ALL_WRITE standard grant. The approval/reject actions are gated on is_finance_reviewer (or is_administrator), not on standard_grant. Navigation visibility (per UX and UI Specification v1.5 — OI-FAW-03 resolved):   Finance Review navigation item is visible when: is_finance_reviewer = TRUE OR is_administrator = TRUE.   The item is not shown to users who hold neither flag, even if they have cost center assignments.** |
+| --- | --- |
+
+# 4. Finance Review Record
+
+## 4.1 Definition
+
+A finance review record is created for each cost center submission event. It tracks the review status and outcome for the combination of budget version, cost center, and fiscal year. Finance review records are distinct from the budget version status — they are the cost-center-granular record of the approval workflow.
+
+Key characteristics:
+
+- One finance review record per unique combination of version_id + cost_center_id + fiscal_year.
+
+- A finance review record is created at the moment a cost center owner (or Administrator) successfully submits a budget via the submission API (POST /api/v1/budget-versions/{version_id}/submit). The record is created in 'pending' status.
+
+- A finance review record is not modified by re-submission. If an Administrator reopens a Submitted budget back to Draft and the cost center owner re-submits, the existing finance review record for that combination is reset to 'pending' status and all prior outcome fields are cleared.
+
+- Finance review records are not deleted when a budget version is archived. They are retained for audit purposes and associated with the archived version.
+
+## 4.2 Status Model
+
+| **Status** | **Description** | **Who / Trigger** |
+| --- | --- | --- |
+| **pending** | The cost center budget has been submitted and is awaiting Finance review. Visible in the Finance Reviewer's approval queue. | System — created automatically on successful budget submission. |
+| **approved** | A Finance Reviewer (or Administrator) has approved the submission. The cost center's budget is considered Finance-approved. | Finance Reviewer or Administrator, via Approve action in Finance Review module. |
+| **rejected** | A Finance Reviewer (or Administrator) has rejected the submission. The cost center budget requires revision and resubmission. | Finance Reviewer or Administrator, via Reject action in Finance Review module. |
+
+## 4.3 Budget Version Status Resolution
+
+Budget version status (on obs.budget_versions) is resolved from the aggregate state of all finance review records for that version. The following rules apply:
+
+| **Decision: ****Budget version status remains ****'****Submitted****'**** until all cost centers within the version that have been submitted resolve to either ****'****approved****'**** or ****'****rejected****'****. Version-level status transitions to ****'****Approved****'**** only when every finance review record for the version is in ****'****approved****'**** status. Version-level status transitions to ****'****Rejected****'**** when at least one finance review record reaches ****'****rejected****'**** status and no finance review records remain in ****'****pending****'**** status. A version with a mix of ****'****approved****'**** and ****'****rejected****'**** records (and no ****'****pending****'**** records) transitions to ****'****Rejected****'****.** |
+| --- |
+
+Resolution rules in full:
+
+| **Condition** | **Budget version status** |
+| --- | --- |
+| One or more finance review records are in 'pending' status. | Submitted — no change. |
+| All finance review records are in 'approved' status and none are in 'pending' or 'rejected'. | Approved — system transitions obs.budget_versions.status to 'Approved' and writes BUDGET_VERSION_APPROVED audit event. |
+| At least one finance review record is in 'rejected' status and none are in 'pending' status. | Rejected — system transitions obs.budget_versions.status to 'Rejected' and writes BUDGET_VERSION_REJECTED audit event. |
+| An Administrator reopens the version to Draft (sets status back to Draft). | Draft — all finance review records for the version are reset to 'pending'. Existing approval_reason / rejection_reason values are cleared. BUDGET_REOPENED audit event is written. |
+
+Note: Cost centers that were never submitted within a version (still in Draft status at the cost center level) do not have finance review records and are excluded from the resolution calculation. Version-level status is resolved only from the set of cost centers that have been submitted.
+
+| **Claude Code Note — obs.finance_review_records schema and status resolution** | **obs.finance_review_records table:   review_id          STRING NOT NULL  (generated UUID)   version_id         STRING NOT NULL  -- FK to obs.budget_versions   cost_center_id     STRING NOT NULL  -- FK to obs.cost_center_hierarchy_nodes   fiscal_year        INT NOT NULL   status             ENUM(****'****pending****'****,****'****approved****'****,****'****rejected****'****) NOT NULL DEFAULT ****'****pending****'****   reviewed_by        STRING (nullable)  -- user_id of Finance Reviewer or Administrator   reviewed_at        TIMESTAMP (nullable)   approval_reason    STRING (nullable)  -- populated on approve; max 2,000 chars   rejection_reason   STRING (nullable)  -- populated on reject; max 2,000 chars   submitted_by       STRING NOT NULL    -- user_id from original submission event   submitted_at       TIMESTAMP NOT NULL   created_at         TIMESTAMP NOT NULL   updated_at         TIMESTAMP NOT NULL   PRIMARY KEY (review_id)   UNIQUE (version_id, cost_center_id, fiscal_year) Record creation on budget submission (modify POST /api/v1/budget-versions/{version_id}/submit):   INSERT INTO obs.finance_review_records (...) VALUES (..., ****'****pending****'****, ...)   ON CONFLICT (version_id, cost_center_id, fiscal_year) DO UPDATE SET     status=****'****pending****'****, submitted_by=:user_id, submitted_at=NOW(),     reviewed_by=NULL, reviewed_at=NULL, approval_reason=NULL,     rejection_reason=NULL, updated_at=NOW(); Version status resolution helper — resolve_budget_version_status(version_id):   SELECT COUNT(*****) FILTER (WHERE status=******'******pending******'******)  AS pending_count,          COUNT(*****) FILTER (WHERE status=****'****approved****'****) AS approved_count,          COUNT(*) FILTER (WHERE status=****'****rejected****'****) AS rejected_count   FROM obs.finance_review_records WHERE version_id = :version_id;   IF pending_count ****>**** 0: no version status change.   ELSE IF rejected_count ****>**** 0: SET obs.budget_versions.status=****'****Rejected****'****; write BUDGET_VERSION_REJECTED.   ELSE IF approved_count ****>**** 0 AND rejected_count = 0: SET obs.budget_versions.status=****'****Approved****'****; write BUDGET_VERSION_APPROVED.   Call resolve_budget_version_status(version_id) at end of every approve and reject API handler. BUDGET_REOPENED handler (existing endpoint — extend):   UPDATE obs.finance_review_records   SET status=****'****pending****'****, reviewed_by=NULL, reviewed_at=NULL,       approval_reason=NULL, rejection_reason=NULL, updated_at=NOW()   WHERE version_id = :version_id;** |
+| --- | --- |
+
+# 5. Finance Review Module
+
+## 5.1 Module Overview
+
+The Finance Review module is a new top-level module in the OBS. It provides Finance Reviewers with a single, scoped view of all cost center submissions awaiting review, and a detail view from which they can approve or reject each submission. The module is visible in the left sidebar navigation to users with is_finance_reviewer = TRUE or is_administrator = TRUE.
+
+The module has two primary screens: the Approval Queue and the Review Detail screen. Screen-level UX specifications (layout, grid configuration, MUI component choices, and interaction detail) are incorporated in UX and UI Specification v1.5 (OI-FAW-03 resolved).
+
+## 5.2 Approval Queue
+
+### 5.2.1 Purpose
+
+The Approval Queue is the default landing screen for the Finance Review module. It displays all finance review records in 'pending' status that fall within the Finance Reviewer's assigned cost center scope. It also provides a view of recently actioned records (approved or rejected within the last 30 days) to support continuity of review.
+
+### 5.2.2 Data Scope
+
+The Approval Queue displays finance review records meeting all of the following conditions:
+
+- version_id references a budget version in obs.budget_versions.
+
+- cost_center_id is within the Finance Reviewer's resolved cost center scope (or any cost center for an Administrator).
+
+- The record's status is 'pending' (primary queue) or 'approved'/'rejected' with reviewed_at within the last 30 calendar days (recent activity section).
+
+A Finance Reviewer with no assigned cost centers sees the empty state: 'No cost centers are assigned to your account. Contact an Administrator to assign cost centers for review.'
+
+### 5.2.3 Queue Columns
+
+| **Column** | **Source** | **Notes** |
+| --- | --- | --- |
+| **Cost Center** | obs.cost_center_hierarchy_nodes.name | Displays the cost center name. Links to Review Detail screen. |
+| **Cost Center ID** | obs.cost_center_hierarchy_nodes.cost_center_id | Displayed alongside name for disambiguation. |
+| **Fiscal Year** | obs.finance_review_records.fiscal_year |  |
+| **Budget Version** | obs.budget_versions.name | The version name (e.g., 'Initial Budget'). |
+| **Submitted By** | obs.users.display_name via submitted_by | Display name of the submitting user. |
+| **Submitted Date** | obs.finance_review_records.submitted_at | Formatted as DD MMM YYYY HH:MM UTC. |
+| **Status** | obs.finance_review_records.status | Displayed as a chip: 'Pending Review' (amber), 'Approved' (green), 'Rejected' (red). |
+| **Reviewed By** | obs.users.display_name via reviewed_by | Blank for pending records. |
+| **Reviewed Date** | obs.finance_review_records.reviewed_at | Blank for pending records. |
+
+### 5.2.4 Queue Filters
+
+- Status filter — multi-select: Pending Review, Approved, Rejected. Default: Pending Review only.
+
+- Fiscal Year filter — single-select dropdown. Defaults to the current fiscal year.
+
+- Budget Version filter — single-select dropdown. Populated based on selected fiscal year. Defaults to 'All'.
+
+- Cost Center search — free-text search against cost center name and cost center ID.
+
+### 5.2.5 Sorting and Ordering
+
+Default sort order: submitted_at ascending (oldest submission first) for pending records. Finance Reviewers may sort by any column. Sort state is not persisted across sessions.
+
+### 5.2.6 Bulk Actions
+
+The Approval Queue provides a bulk approve action for efficiency. Finance Reviewers may select multiple pending records using row checkboxes and apply a single approval reason to all selected records in one operation. Bulk reject is not supported — individual rejection reasons are required per submission (Section 6.2). The bulk approve action requires the same mandatory approval reason field as the individual approve action.
+
+## 5.3 Review Detail Screen
+
+### 5.3.1 Purpose
+
+The Review Detail screen provides a Finance Reviewer with a read-only view of the submitted budget for a specific cost center, alongside the Approve and Reject action controls. The screen opens when the Finance Reviewer clicks a row in the Approval Queue.
+
+### 5.3.2 Read-Only Budget View
+
+The budget data displayed on the Review Detail screen is sourced from obs.budget_lines, obs.budget_targets, and obs.vendor_line_items for the selected version_id + cost_center_id + fiscal_year combination. The display is identical to the Budget Planning module's budget entry grid in read-only mode, including:
+
+- Account hierarchy rows with monthly period amounts and totals.
+
+- Budget targets and variance-against-target indicators where targets exist.
+
+- Commentary entered by the cost center owner on accounts with variance > 10% (displayed read-only in the review panel).
+
+- Vendor attribution details accessible via the same side panel interaction as the Budget Planning module (read-only).
+
+The Finance Reviewer has no ability to modify budget lines, targets, vendor attributions, or commentary from this screen. All write operations for those entities remain in the Budget Planning module and require appropriate grants.
+
+### 5.3.3 Submission Metadata Panel
+
+A summary panel above the budget grid displays: cost center name and ID; fiscal year and budget version name; submitted by (display name) and submitted date; current review status chip (Pending Review / Approved / Rejected); if already actioned: reviewed by (display name), reviewed date, and the approval or rejection reason.
+
+### 5.3.4 Action Panel
+
+For finance review records in 'pending' status, the action panel displays two primary actions: Approve and Reject. Both actions require a mandatory reason field before the action can be submitted. The action panel is suppressed (read-only state displayed) for records already in 'approved' or 'rejected' status.
+
+**Approve action flow:**
+
+- Finance Reviewer enters a mandatory approval reason (free-text, maximum 2,000 characters).
+
+- Finance Reviewer clicks 'Approve'. A confirmation modal is displayed: 'Approve budget for [Cost Center Name] — FY[Year], [Version Name]? This action cannot be undone. Once approved, the budget cannot be edited without Administrator intervention.' Actions: 'Approve' (primary) | 'Cancel'.
+
+- On confirmation: POST /api/v1/finance-review/{review_id}/approve is called. On success, the review record status changes to 'approved', the action panel transitions to read-only, and a success toast is displayed: 'Budget approved for [Cost Center Name].'
+
+- Version status resolution runs server-side immediately after the record update (Section 4.3).
+
+**Reject action flow:**
+
+- Finance Reviewer enters a mandatory rejection reason (free-text, maximum 2,000 characters).
+
+- Finance Reviewer clicks 'Reject'. A confirmation modal is displayed: 'Reject budget for [Cost Center Name] — FY[Year], [Version Name]? The cost center owner will be notified. The budget must be revised and resubmitted.' Actions: 'Reject' (primary, destructive styling) | 'Cancel'.
+
+- On confirmation: POST /api/v1/finance-review/{review_id}/reject is called. On success, the review record status changes to 'rejected', the action panel transitions to read-only, and a success toast is displayed: 'Budget rejected for [Cost Center Name]. The cost center owner has been notified.'
+
+- Version status resolution runs server-side immediately after the record update (Section 4.3).
+
+## 5.4 Navigation Visibility Rule
+
+The Finance Review navigation item is visible in the left sidebar when the authenticated user's ObsUserContext indicates is_finance_reviewer = TRUE or is_administrator = TRUE. It is not rendered for any other user. The navigation item uses an appropriate icon (e.g., FactCheck or AssignmentTurnedIn from MUI Icons) and the label 'Finance Review'. Full sidebar layout and navigation structure are defined in UX and UI Specification v1.5 Section 3.2.
+
+# 6. Approve and Reject Actions
+
+## 6.1 Approve Action
+
+### 6.1.1 Pre-conditions
+
+- The finance review record must be in 'pending' status.
+
+- The calling user must be is_finance_reviewer = TRUE or is_administrator = TRUE.
+
+- The calling user must have a cost center access grant (of any standard permission grant level) for the cost_center_id, OR must be an Administrator.
+
+- approval_reason must be a non-null, non-empty string of maximum 2,000 characters.
+
+### 6.1.2 Server-Side Validation
+
+- Verify review_id exists in obs.finance_review_records. Return HTTP 404 if not found.
+
+- Verify current status is 'pending'. Return HTTP 409 with message 'This submission has already been reviewed.' if status is 'approved' or 'rejected'.
+
+- Verify caller permission: is_administrator = TRUE OR (is_finance_reviewer = TRUE AND cost center in caller's assigned scope). Return HTTP 403 if neither condition is met.
+
+- Verify approval_reason is non-null, non-empty, and at most 2,000 characters. Return HTTP 422 with field: approval_reason, message: 'Approval reason is required and must not exceed 2,000 characters.' if validation fails.
+
+### 6.1.3 State Transitions on Success
+
+- UPDATE obs.finance_review_records SET status = 'approved', reviewed_by = :user_id, reviewed_at = NOW(), approval_reason = :approval_reason, updated_at = NOW() WHERE review_id = :review_id.
+
+- Write BUDGET_APPROVED audit event (see Section 10).
+
+- Call resolve_budget_version_status(version_id). If version status transitions, write the appropriate version-level audit event.
+
+- Send in-application notification to the submitted_by user per In-Application Notification Mechanism Specification v1.1 Sections 4 and 5.
+
+## 6.2 Reject Action
+
+### 6.2.1 Pre-conditions
+
+- The finance review record must be in 'pending' status.
+
+- The calling user must be is_finance_reviewer = TRUE or is_administrator = TRUE.
+
+- The calling user must have a cost center access grant for the cost_center_id, OR must be an Administrator.
+
+- rejection_reason must be a non-null, non-empty string of maximum 2,000 characters.
+
+### 6.2.2 Server-Side Validation
+
+Same validation sequence as approve (Section 6.1.2), substituting rejection_reason:
+
+- Verify review_id exists. Return HTTP 404 if not found.
+
+- Verify current status is 'pending'. Return HTTP 409 if already reviewed.
+
+- Verify caller permission. Return HTTP 403 if not met.
+
+- Verify rejection_reason is non-null, non-empty, and at most 2,000 characters. Return HTTP 422 with field: rejection_reason, message: 'Rejection reason is required and must not exceed 2,000 characters.'
+
+### 6.2.3 State Transitions on Success
+
+- UPDATE obs.finance_review_records SET status = 'rejected', reviewed_by = :user_id, reviewed_at = NOW(), rejection_reason = :rejection_reason, updated_at = NOW() WHERE review_id = :review_id.
+
+- Write BUDGET_REJECTED audit event (see Section 10).
+
+- Call resolve_budget_version_status(version_id). If version status transitions, write the appropriate version-level audit event.
+
+- Send in-application notification to the submitted_by user per In-Application Notification Mechanism Specification v1.1 Sections 4 and 5.
+
+## 6.3 Bulk Approve Action
+
+The bulk approve action allows a Finance Reviewer to approve multiple pending submissions in one operation from the Approval Queue.
+
+| **Claude Code Note — Bulk approve API** | **POST /api/v1/finance-review/bulk-approve Request body: { review_ids: [string], approval_reason: string } Processing:   approval_reason must be non-null, non-empty, max 2,000 chars — validated once for the entire request.   Each review_id in review_ids is processed independently.   For each review_id:     Apply same validation as single approve (status=pending, caller permission, review_id exists).     On pass: update record to ****'****approved****'****, write BUDGET_APPROVED audit event,              run resolve_budget_version_status, send notification (Notification Spec v1.0).     On fail: record the error and continue processing remaining IDs.   Returns HTTP 207 Multi-Status with per-record success/error. Response body:   { results: [ { review_id, status: ****'****approved****'**** │ ****'****error****'****, error_code?, error_message? } ] } A single shared approval_reason is applied to all records in the bulk operation. Summary toast after completion: ****'****X of Y submissions approved. Z failed — see details.****'** |
+| --- | --- |
+
+# 7. Access Control Summary for Finance Review Module
+
+The following table summarises the access rules for all Finance Review module actions. All enforcement is server-side. The frontend reflects these rules in the UI (suppressing or disabling actions) but the API is the authoritative enforcement point.
+
+| **Action** | **Finance Reviewer (in scope)** | **Finance Reviewer (out of scope)** | **Administrator** |
+| --- | --- | --- | --- |
+| View Finance Review module (nav item) | Visible | Visible | Visible |
+| View Approval Queue | Yes — scoped to assigned cost centers | No records shown | Yes — all cost centers |
+| View Review Detail screen | Yes — for assigned cost centers only | HTTP 403 | Yes — all cost centers |
+| View submitted budget data (read-only) | Yes — ALL_READ or ALL_WRITE standard grant required | HTTP 403 | Yes — implicit |
+| Approve a pending submission | Yes — for assigned cost centers | HTTP 403 | Yes — all cost centers |
+| Reject a pending submission | Yes — for assigned cost centers | HTTP 403 | Yes — all cost centers |
+| Bulk approve | Yes — for assigned cost centers | HTTP 403 per out-of-scope item | Yes — all cost centers |
+| Reopen an approved/rejected budget to Draft | No — HTTP 403 | No — HTTP 403 | Yes — via Budget Versions admin screen (existing capability) |
+
+# 8. In-Application Notification Touchpoints
+
+The Finance Approval Workflow defines the following notification touchpoints. All five touchpoints are fully specified and implementable per In-Application Notification Mechanism Specification v1.1 Sections 4 and 5. The delivery mechanism (notification bell, inbox panel, obs.notifications persistence model, read/unread state) is specified in Notification Mechanism Specification v1.1.
+
+**Implementation note:** Full implementation per the Notification Mechanism Specification v1.1 is required. No-op stubs are not acceptable.
+
+| **Event** | **Recipient(s)** | **Notification Content** | **Implementation Note** |
+| --- | --- | --- | --- |
+| Budget submission (existing BUDGET_SUBMITTED event) | Finance Reviewers who have the submitted cost center within their assigned scope. | '[Cost Center Name] — FY[Year] ([Version Name]) has been submitted for Finance review by [Submitter Display Name].' Links to Review Detail screen. | Recipients resolved by querying obs.user_cost_center_grants and obs.user_rollup_grants for users with is_finance_reviewer = TRUE whose scope covers the cost_center_id. Full spec: Notification Mechanism Spec v1.0 Sections 4 and 5. |
+| Budget approved (BUDGET_APPROVED event) | The user identified by submitted_by on the finance review record. | 'Your budget for [Cost Center Name] — FY[Year] ([Version Name]) has been approved by [Reviewer Display Name]. Reason: [approval_reason (truncated to 300 chars if longer)].' Links to Budget Planning module. | Full spec: Notification Mechanism Spec v1.0. |
+| Budget rejected (BUDGET_REJECTED event) | The user identified by submitted_by on the finance review record. | 'Your budget for [Cost Center Name] — FY[Year] ([Version Name]) has been rejected by [Reviewer Display Name]. Reason: [rejection_reason (truncated to 300 chars if longer)]. Please revise and resubmit.' Links to Budget Planning module. | Full spec: Notification Mechanism Spec v1.0. |
+| Budget version fully approved (BUDGET_VERSION_APPROVED event) | Administrators only. | 'Budget version [Version Name] — FY[Year] is fully approved. All submitted cost centers have been approved by Finance.' Links to Budget Versions administration screen. | Only fires when resolve_budget_version_status transitions the version to 'Approved'. Full spec: Notification Mechanism Spec v1.0. |
+| Budget version rejected (BUDGET_VERSION_REJECTED event) | Administrators only. | 'Budget version [Version Name] — FY[Year] has been rejected. One or more cost center submissions were rejected by Finance.' Links to Budget Versions administration screen. | Only fires when resolve_budget_version_status transitions the version to 'Rejected'. Full spec: Notification Mechanism Spec v1.0. |
+
+Acceptance criteria for FAW notification touchpoints: AC-NOTIF-FAW-01 through AC-NOTIF-FAW-06 are defined in In-Application Notification Mechanism Specification v1.1 Section 10.5.
+
+# 9. API Contracts
+
+All endpoints conform to the RESTful API patterns, authentication model, and error response conventions established in Application Architecture Specification v3.6 and Security and Access Control Specification v1.4. Every endpoint validates the Entra ID access token and resolves user permissions before executing any business logic.
+
+## 9.1 Get Approval Queue
+
+| **Claude Code Note — GET /api/v1/finance-review** | **Auth: is_finance_reviewer = TRUE or is_administrator = TRUE — else HTTP 403. Query parameters:   status       STRING  (optional) comma-separated: ****'****pending****'****, ****'****approved****'****, ****'****rejected****'****. Default: ****'****pending****'****.   fiscal_year  INT     (optional) filter by fiscal year. Default: current fiscal year.   version_id   STRING  (optional) filter by budget version.   search       STRING  (optional) free-text match against cost_center_name or cost_center_id.   sort_by      STRING  (optional) column name. Default: submitted_at.   sort_dir     STRING  (optional) ****'****asc****'**** │ ****'****desc****'****. Default: ****'****asc****'****.   page         INT     (optional) 1-based page index. Default: 1.   page_size    INT     (optional) records per page. Default: 50. Max: 200. Response HTTP 200:   { total_count, page, page_size, results: [     { review_id, version_id, version_name, cost_center_id, cost_center_name,       fiscal_year, status, submitted_by_id, submitted_by_name, submitted_at,       reviewed_by_id, reviewed_by_name, reviewed_at }     // approval_reason and rejection_reason are NOT included in queue list response   ] } Scope enforcement: Pre-scope the query to the caller****'****s resolved cost center scope. Do not retrieve unrestricted records and filter afterward — inject scope into SQL WHERE clause. Recent activity: Records with status ****'****approved****'**** or ****'****rejected****'**** are only returned if reviewed_at ****>****= NOW() - INTERVAL 30 DAYS.** |
+| --- | --- |
+
+## 9.2 Get Review Detail
+
+| **Claude Code Note — GET /api/v1/finance-review/{review_id}** | **Auth: is_finance_reviewer = TRUE or is_administrator = TRUE — else HTTP 403. Scope: cost_center_id must be in caller****'****s scope, or caller is Administrator — else HTTP 403. Response HTTP 200:   { review_id, version_id, version_name, cost_center_id, cost_center_name,     fiscal_year, status, submitted_by_id, submitted_by_name, submitted_at,     reviewed_by_id, reviewed_by_name, reviewed_at,     approval_reason,   // null if not yet approved     rejection_reason,  // null if not yet rejected     budget_summary: { lines, targets, commentary, aggregates }   } The budget_summary.lines payload must not include compensation fields (base_salary, burden_rate, etc.) unless the caller has ALL_READ or ALL_WRITE confidential grant. Standard confidential data enforcement applies per Security v1.3 Section 4.2.** |
+| --- | --- |
+
+## 9.3 Approve Submission
+
+| **Claude Code Note — POST /api/v1/finance-review/{review_id}/approve** | **Auth: is_finance_reviewer = TRUE or is_administrator = TRUE — else HTTP 403. Scope: cost_center_id must be in caller****'****s scope, or caller is Administrator — else HTTP 403. Request body: { approval_reason: string } Validation:   1. review_id exists in obs.finance_review_records — HTTP 404 if not.   2. record.status == ****'****pending****'**** — HTTP 409 if already reviewed.   3. caller permission — HTTP 403 if fails.   4. approval_reason non-null, non-empty, len ****<****= 2000 — HTTP 422 if fails. On success:   UPDATE obs.finance_review_records SET status=****'****approved****'****, reviewed_by=:user_id,     reviewed_at=NOW(), approval_reason=:approval_reason, updated_at=NOW()   WHERE review_id = :review_id;   Write BUDGET_APPROVED audit event.   Call resolve_budget_version_status(version_id).   Send in-application notification to submitted_by user (Notification Spec v1.0).   Return HTTP 200 with updated finance review record (full payload).** |
+| --- | --- |
+
+## 9.4 Reject Submission
+
+| **Claude Code Note — POST /api/v1/finance-review/{review_id}/reject** | **Auth: is_finance_reviewer = TRUE or is_administrator = TRUE — else HTTP 403. Scope: cost_center_id must be in caller****'****s scope, or caller is Administrator — else HTTP 403. Request body: { rejection_reason: string } Validation:   1. review_id exists — HTTP 404 if not.   2. record.status == ****'****pending****'**** — HTTP 409 if already reviewed.   3. caller permission — HTTP 403 if fails.   4. rejection_reason non-null, non-empty, len ****<****= 2000 — HTTP 422 if fails. On success:   UPDATE obs.finance_review_records SET status=****'****rejected****'****, reviewed_by=:user_id,     reviewed_at=NOW(), rejection_reason=:rejection_reason, updated_at=NOW()   WHERE review_id = :review_id;   Write BUDGET_REJECTED audit event.   Call resolve_budget_version_status(version_id).   Send in-application notification to submitted_by user (Notification Spec v1.0).   Return HTTP 200 with updated finance review record.** |
+| --- | --- |
+
+## 9.5 Bulk Approve
+
+See Section 6.3 Claude Code Note for the full bulk approve API contract.
+
+## 9.6 Modified: Budget Submission API
+
+The existing POST /api/v1/budget-versions/{version_id}/submit endpoint (Functional Requirements: Budget Planning v1.1 Section 9.1) is modified to create a finance review record as described in Section 4.3 (Claude Code Note). No change to the existing request or response contract. The creation of the finance review record is an additional side effect, executed inside the same transaction as the status change.
+
+## 9.7 Modified: Budget Version Reopen
+
+The Administrator action to reopen a Submitted budget to Draft (setting obs.budget_versions.status back to 'Draft') must additionally reset all finance review records for that version to 'pending' status, clearing reviewed_by, reviewed_at, approval_reason, and rejection_reason. This is specified in the Claude Code Note in Section 4.3.
+
+# 10. Audit Events
+
+All audit events conform to the structure defined in Application Architecture Specification v3.6 Section 7.2. New event types introduced by this specification are listed below. Existing events modified by this specification (BUDGET_SUBMITTED, BUDGET_REOPENED) retain their existing structure — no changes to their payload.
+
+| **Event Type** | **Payload Fields** |
+| --- | --- |
+| **BUDGET_APPROVED** | review_id, version_id, cost_center_id, fiscal_year, approved_by (user_id), approval_reason, timestamp |
+| **BUDGET_REJECTED** | review_id, version_id, cost_center_id, fiscal_year, rejected_by (user_id), rejection_reason, timestamp |
+| **BUDGET_VERSION_APPROVED** | version_id, fiscal_year, version_name, resolved_by (system), timestamp |
+| **BUDGET_VERSION_REJECTED** | version_id, fiscal_year, version_name, resolved_by (system), rejected_cost_center_ids (array), timestamp |
+| **FINANCE_REVIEWER_FLAG_SET** | target_user_id, set_by (Administrator user_id), old_value (BOOLEAN), new_value (BOOLEAN), timestamp |
+
+FINANCE_REVIEWER_FLAG_SET is written when an Administrator sets or clears the is_finance_reviewer flag on any user record. This follows the same audit pattern as other capability flag changes.
+
+# 11. PostgreSQL Schema Summary
+
+The following table summarises all schema additions and modifications introduced by this specification.
+
+| **Table** | **Change Type** | **Detail** |
+| --- | --- | --- |
+| **obs.users** | Column addition | ADD COLUMN is_finance_reviewer BOOLEAN NOT NULL DEFAULT FALSE. Follows existing pattern for is_system_modeler and is_report_developer. |
+| **obs.finance_review_records** | New table | Full schema defined in Section 4.3 Claude Code Note. Tracks one review record per version_id + cost_center_id + fiscal_year combination. |
+| **obs.budget_versions** | No schema change | The status ENUM already includes 'Approved' and 'Rejected' values (Functional Requirements: Budget Planning v1.1 Section 3.1). No alteration required. Status is set programmatically by resolve_budget_version_status() helper. |
+| **obs.audit_log** | New event_type values | BUDGET_APPROVED, BUDGET_REJECTED, BUDGET_VERSION_APPROVED, BUDGET_VERSION_REJECTED, FINANCE_REVIEWER_FLAG_SET. No structural change to the audit log table. |
+
+# 12. Administration Module Changes
+
+The following changes to the existing Administration module are required to support the Finance Approval Workflow. These are additions to existing administration screens — no new administration screens are required.
+
+## 12.1 User Provisioning Screen — is_finance_reviewer Flag
+
+The User Provisioning screen (Administration module) must expose the is_finance_reviewer flag alongside the existing is_system_modeler and is_report_developer flags. The UI pattern (checkbox or toggle) must match the existing capability flag controls. Setting or clearing is_finance_reviewer requires Administrator capability. The action writes a FINANCE_REVIEWER_FLAG_SET audit event.
+
+## 12.2 Cost Center Assignment — Finance Reviewer Scope
+
+Finance Reviewers are assigned cost centers and cost center rollups using the existing cost center assignment mechanism. No new assignment UI is required — the existing cost center assignment screen in the Administration module is used. When assigning a cost center to a Finance Reviewer, the Administrator sets the standard permission grant; ALL_READ is the appropriate default and minimum required for Finance Reviewers. Confidential data grant may be set as appropriate per the Finance Reviewer's needs but is not required for approval actions.
+
+## 12.3 Budget Versions Administration Screen — Review Status Visibility
+
+The Budget Versions administration screen (existing screen) must be extended to display the finance review status summary for each version. The addition is:
+
+- A 'Review Status' column or expandable panel showing, for each budget version: the count of pending, approved, and rejected finance review records.
+
+- An expandable detail view listing each submitted cost center with its finance review status, reviewed by, and reviewed date.
+
+# 13. Acceptance Criteria
+
+Acceptance criteria are grouped by functional area. Each criterion is independently testable. All server-side enforcement is verified against the API layer — frontend behaviour is not the authoritative test for access control or business rule enforcement.
+
+## 13.1 Finance Reviewer Capability Flag
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-FAW-FLAG-01** | The obs.users table contains the is_finance_reviewer BOOLEAN column, NOT NULL, DEFAULT FALSE. Existing user records that predate this amendment have is_finance_reviewer = FALSE. |
+| **AC-FAW-FLAG-02** | Only a request authenticated with is_administrator = TRUE may set or clear the is_finance_reviewer flag. Non-Administrator attempts return HTTP 403. |
+| **AC-FAW-FLAG-03** | Setting or clearing is_finance_reviewer writes a FINANCE_REVIEWER_FLAG_SET audit event with old_value and new_value. |
+| **AC-FAW-FLAG-04** | The Finance Review navigation item is visible to users with is_finance_reviewer = TRUE and to Administrators. It is not rendered for any other user, including users with cost center access grants but neither flag. |
+| **AC-FAW-FLAG-05** | A user with is_finance_reviewer = TRUE and no cost center assignments sees the empty state message in the Finance Review module and receives no finance review data from any Finance Review API endpoint. |
+
+## 13.2 Finance Review Record Creation
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-FAW-REC-01** | A successful call to POST /api/v1/budget-versions/{version_id}/submit creates a finance review record in obs.finance_review_records with status = 'pending' for the submitted version_id + cost_center_id + fiscal_year combination. |
+| **AC-FAW-REC-02** | If a finance review record already exists for the same version_id + cost_center_id + fiscal_year (due to reopen and resubmit), the record is reset to status = 'pending' with reviewed_by, reviewed_at, approval_reason, and rejection_reason all set to NULL. A new record is not created. |
+| **AC-FAW-REC-03** | Finance review records are not deleted when the associated budget version is archived. They remain accessible in obs.finance_review_records and in the audit log. |
+
+## 13.3 Approval Queue
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-FAW-QUEUE-01** | GET /api/v1/finance-review returns only finance review records for cost centers within the authenticated Finance Reviewer's assigned scope. Records for cost centers outside their scope are never returned. |
+| **AC-FAW-QUEUE-02** | An Administrator calling GET /api/v1/finance-review receives records for all cost centers across all versions. |
+| **AC-FAW-QUEUE-03** | The default response (no status filter) returns only records with status = 'pending'. |
+| **AC-FAW-QUEUE-04** | When status filter includes 'approved' or 'rejected', only records with reviewed_at within the last 30 calendar days are returned for those statuses. |
+| **AC-FAW-QUEUE-05** | A non-Finance-Reviewer, non-Administrator user calling any Finance Review API endpoint receives HTTP 403. |
+| **AC-FAW-QUEUE-06** | The Approval Queue supports sorting by submitted_at (default ascending), cost_center_name, and status. |
+
+## 13.4 Review Detail
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-FAW-DETAIL-01** | GET /api/v1/finance-review/{review_id} returns HTTP 403 when the cost center is outside the authenticated Finance Reviewer's assigned scope. |
+| **AC-FAW-DETAIL-02** | The budget_summary payload in the Review Detail response omits compensation fields (base_salary, burden_rate, and all derived compensation fields) when the caller has ALL_NONE confidential grant for the cost center. This enforcement is at the API response layer. |
+| **AC-FAW-DETAIL-03** | The Review Detail response for an already-actioned record includes approval_reason or rejection_reason in the payload. |
+
+## 13.5 Approve Action
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-FAW-APR-01** | POST /api/v1/finance-review/{review_id}/approve with a valid approval_reason updates the review record to status = 'approved', sets reviewed_by, reviewed_at, and approval_reason, and returns HTTP 200. |
+| **AC-FAW-APR-02** | POST /api/v1/finance-review/{review_id}/approve with a null or empty approval_reason returns HTTP 422 with field: approval_reason. |
+| **AC-FAW-APR-03** | POST /api/v1/finance-review/{review_id}/approve with an approval_reason exceeding 2,000 characters returns HTTP 422 with field: approval_reason. |
+| **AC-FAW-APR-04** | Calling the approve endpoint on a record with status = 'approved' or status = 'rejected' returns HTTP 409. |
+| **AC-FAW-APR-05** | A successful approve action writes a BUDGET_APPROVED audit event with the correct review_id, version_id, cost_center_id, fiscal_year, approved_by, and approval_reason. |
+| **AC-FAW-APR-06** | A Finance Reviewer calling the approve endpoint for a cost center outside their scope receives HTTP 403. The record is not modified. |
+
+## 13.6 Reject Action
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-FAW-REJ-01** | POST /api/v1/finance-review/{review_id}/reject with a valid rejection_reason updates the review record to status = 'rejected', sets reviewed_by, reviewed_at, and rejection_reason, and returns HTTP 200. |
+| **AC-FAW-REJ-02** | POST /api/v1/finance-review/{review_id}/reject with a null or empty rejection_reason returns HTTP 422 with field: rejection_reason. |
+| **AC-FAW-REJ-03** | POST /api/v1/finance-review/{review_id}/reject with a rejection_reason exceeding 2,000 characters returns HTTP 422 with field: rejection_reason. |
+| **AC-FAW-REJ-04** | Calling the reject endpoint on a record with status = 'approved' or status = 'rejected' returns HTTP 409. |
+| **AC-FAW-REJ-05** | A successful reject action writes a BUDGET_REJECTED audit event with the correct review_id, version_id, cost_center_id, fiscal_year, rejected_by, and rejection_reason. |
+| **AC-FAW-REJ-06** | A Finance Reviewer calling the reject endpoint for a cost center outside their scope receives HTTP 403. The record is not modified. |
+
+## 13.7 Version Status Resolution
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-FAW-VER-01** | When all finance review records for a version are in 'approved' status and none are in 'pending' or 'rejected', obs.budget_versions.status is set to 'Approved' and a BUDGET_VERSION_APPROVED audit event is written. |
+| **AC-FAW-VER-02** | When at least one finance review record for a version is in 'rejected' status and no records remain in 'pending' status, obs.budget_versions.status is set to 'Rejected' and a BUDGET_VERSION_REJECTED audit event is written. |
+| **AC-FAW-VER-03** | When at least one finance review record for a version is in 'pending' status, obs.budget_versions.status remains 'Submitted'. No version status audit event is written. |
+| **AC-FAW-VER-04** | A budget version with a mix of 'approved' and 'rejected' finance review records (and no 'pending' records) transitions to 'Rejected' status, not 'Approved'. |
+| **AC-FAW-VER-05** | The Administrator reopen action (setting a version back to Draft) resets all finance review records for that version to 'pending' and clears reviewed_by, reviewed_at, approval_reason, and rejection_reason. |
+| **AC-FAW-VER-06** | Cost centers within a version that have not been submitted (no finance review record exists for them) are excluded from version status resolution. Their absence does not prevent the version from reaching 'Approved' status. |
+
+## 13.8 Bulk Approve
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-FAW-BULK-01** | POST /api/v1/finance-review/bulk-approve with a valid review_ids array and approval_reason returns HTTP 207 with per-record success/error results. |
+| **AC-FAW-BULK-02** | For bulk approve, a single approval_reason that is null, empty, or exceeds 2,000 characters causes the entire request to be rejected with HTTP 422 before any records are processed. |
+| **AC-FAW-BULK-03** | In a bulk approve request, records that fail individual validation (already reviewed, out of scope) return per-record errors. Successfully validated records are approved. The operation does not fail entirely due to individual record failures. |
+| **AC-FAW-BULK-04** | Each successfully approved record in a bulk operation writes an individual BUDGET_APPROVED audit event. A single bulk audit event is not sufficient. |
+
+## 13.9 Administration Module
+
+| **ID** | **Criterion** |
+| --- | --- |
+| **AC-FAW-ADM-01** | The User Provisioning screen in the Administration module displays the is_finance_reviewer flag alongside is_system_modeler and is_report_developer, using the same UI pattern as those controls. |
+| **AC-FAW-ADM-02** | The Budget Versions administration screen displays a review status summary (count of pending, approved, rejected finance review records) for each budget version. |
+| **AC-FAW-ADM-03** | The Budget Versions administration screen expandable detail lists each submitted cost center's finance review status, reviewed_by display name, and reviewed_at date. |
+
+# 14. Open Items
+
+| **OI-FAW-01 — In-application notification mechanism (OI-WP-03 dependency) — RESOLVED**** In-Application Notification Mechanism Specification v1.0 was issued. The specification fully defines: the notification bell component (application shell header, unread count badge, polling model); the notification inbox panel (read/unread state, pagination, mark-read); the obs.notifications PostgreSQL table schema; the notification service API (create_notification, create_notifications_bulk, GET /api/v1/notifications, POST mark-read, POST mark-all-read); and all five Finance Approval Workflow notification touchpoints: BUDGET_SUBMITTED (to scoped Finance Reviewers), BUDGET_APPROVED (to the cost center submitter), BUDGET_REJECTED (to the cost center submitter), BUDGET_VERSION_APPROVED (to all Administrators), BUDGET_VERSION_REJECTED (to all Administrators). Full implementation details, recipient resolution rules, notification content, and deep-link routing for all five events are specified in Notification Mechanism Specification v1.0 Sections 4 and 5. The no-op stub instruction previously in this section is superseded — full implementation per the Notification Mechanism Specification is required. Acceptance criteria AC-NOTIF-FAW-01 through AC-NOTIF-FAW-06 are defined in Notification Mechanism Specification v1.0 Section 10.5.** |
+| --- |
+
+| **OI-FAW-02 — Security and Access Control Specification v1.3 amendment — RESOLVED**** Security and Access Control Specification v1.3 has been issued. Changes incorporated: is_finance_reviewer added as the fourth capability flag; Finance Reviewer capability table added (Section 3.4); Finance Reviewer rows added to Combined Capability Examples (Section 3.6); obs.users schema updated in Claude Code note; is_finance_reviewer column added to Permission Matrix (Section 5); FINANCE_REVIEWER_FLAG_SET audit event added (Section 8.1); AC-CAP-09 through AC-CAP-11 and AC-CONF-07 added; all related sections and depends-on references updated.** |
+| --- |
+
+| **OI-FAW-03 — UX and UI Specification v1.2 amendment — RESOLVED**** UX and UI Specification v1.2 was issued. Changes incorporated: Finance Review navigation item added to sidebar structure (Section 3.2.1 and 3.2.2); Finance Review module added as Section 8 (Approval Queue screen, Review Detail screen, action panel interactions, confirmation modals, empty and loading states, toast notifications); acceptance criteria AC-UP-FR-01 through AC-UP-FR-20 added; Finance Review non-functional performance targets added. The UX spec subsequently reached v1.4; Finance Review UX remains in force.** |
+| --- |
+
+| **OI-FAW-04 — Application Architecture Specification v3.4 amendment — RESOLVED**** Application Architecture Specification v3.4 was issued. Changes incorporated: Finance Review module added to the frontend module list (Section 3.1); Finance Review responsibilities added to backend API section (Section 3.2); Finance Review data added to the PostgreSQL core table areas (Section 3.5); Finance approval workflow audit events added (Section 7.1); Finance-side approval workflow removed from out-of-scope list (Section 9.3). The Architecture spec subsequently reached v3.6; all FAW entries remain in force.** |
+| --- |
+
+| **OI-FAW-05 — System Context and Domain Glossary v1.7 amendment — RESOLVED**** System Context and Domain Glossary v1.7 was issued. Changes incorporated: Finance Reviewer, finance review record, approval reason, and rejection reason added; Finance approval workflow added as a primary system function; Finance Reviewer user type added. The Glossary subsequently reached v1.9; all FAW terms remain in force.** |
+| --- |
+
+All open items are now resolved. No outstanding items remain in this specification.
+
+# 15. Document Control
+
+| **Version** | **Date** | **Author** | **Change Summary** |
+| --- | --- | --- | --- |
+| 1.0 | Draft | TBD | Initial version — Finance Approval Workflow. Defines is_finance_reviewer capability flag, Finance Reviewer cost center scope model, Finance Review module (Approval Queue and Review Detail screens), finance review record data model, approve and reject actions with mandatory reasons, bulk approve, version status resolution rules, in-application notification touchpoints (pending OI-WP-03), API contracts, audit events, Delta Lake schema additions, Administration module changes, and acceptance criteria. Five companion amendments identified (OI-FAW-01 through OI-FAW-05). |
+| 1.1 | Draft | TBD | Resolves OI-FAW-02, OI-FAW-03, OI-FAW-04, and OI-FAW-05. All four companion specification amendments confirmed issued and complete: Security and Access Control Specification v1.3, UX and UI Specification v1.2, Application Architecture Specification v3.4, System Context and Domain Glossary v1.7. Depends-on references updated. Section 14 open items: OI-FAW-02 through OI-FAW-05 closed. OI-FAW-01 (OI-WP-03 notification dependency) remained open. |
+| 1.2 | Draft | TBD | Section 14 Open Items: OI-FAW-01 closed — In-Application Notification Mechanism Specification v1.0 issued, resolving OI-WP-03 and OI-FAW-01. All five FAW notification touchpoints fully specified and implementable. No-op stub instruction in Section 8 superseded. Section 1.1 relationship table updated to current specification versions (Architecture v3.5, UX v1.4, Glossary v1.9; Notification Mechanism Specification v1.0 added). Depends-on references and related documents updated. |
+| 1.2 — Full Restatement | Draft | TBD | Full restatement incorporating all content from v1.0 through v1.2. All 15 sections present in full. Section 8 notification touchpoints updated: no-op stub language removed; full implementation per Notification Mechanism Specification v1.0 required. Depends-on references updated to Architecture v3.5, Security v1.3, UX v1.4, Glossary v1.9, Notification Spec v1.0, Budget Planning v1.1. Supersedes all prior versions. |
+| 1.2 — Full Restatement (platform-aligned) | Draft | Claude | Databricks-free platform cascade aligned to Architecture Spec v3.6 (no functional-requirement content changed). Section 11 heading changed from "Delta Lake Schema Summary" to "PostgreSQL Schema Summary." References to Delta Lake conventions and the obs.finance_review_records / obs.notifications stores changed to PostgreSQL (the obs schema); abstract column types (STRING, INT, ENUM, TIMESTAMP) preserved. The obs.finance_review_records DDL already used PostgreSQL INSERT … ON CONFLICT DO UPDATE and is unchanged. Depends-on and pointers updated to Architecture v3.6, Security v1.4, UX/UI v1.5. |
+| 1.2 — Full Restatement (errata) | Draft | Claude | Version-reference corrections per Specification Consistency & Errata Report v1.0 (in-place errata; no technical content changed). Active references in the depends-on header, relationship/related-documents lists, and instructional cross-references updated to current versions: System Context and Domain Glossary v1.9 → v1.11; Functional Requirements: Workforce Planning v1.0 → v1.1; Data Integration Specification v1.5 → v1.6; In-Application Notification Mechanism Specification v1.0 → v1.1; Security and Access Control Specification v1.3 → v1.4; UX and UI Specification v1.4 → v1.5; Project Context Handoff v2.3 → v2.4 (as applicable to this document). Historical Document Control rows and open-item resolution narratives describing past events are unchanged. |
+
+**Related Documents**
+
+- OPEX Budgeting System — System Context and Domain Glossary v1.11
+
+- OPEX Budgeting System — Application Architecture Specification v3.6
+
+- OPEX Budgeting System — Security and Access Control Specification v1.4
+
+- OPEX Budgeting System — UX and UI Specification v1.5
+
+- OPEX Budgeting System — Data Integration Specification v1.6
+
+- OPEX Budgeting System — In-Application Notification Mechanism Specification v1.1
+
+- OPEX Budgeting System — Functional Requirements: Budget Planning v1.1
+
+- OPEX Budgeting System — Functional Requirements: Workforce Planning v1.1
+
+- OPEX Budgeting System — Functional Requirements: Reporting v1.1
+
+- OPEX Budgeting System — Project Context Handoff v2.4
+
+OBS_Functional_Requirements_Finance_Approval_Workflow_v1_2_Full.docx Page of
+
+Page  of
