@@ -130,11 +130,11 @@ CREATE TRIGGER trg_audit_log_append_only
 
 -- =====================================================================
 -- SECTION 3 — DIMENSION / INGESTION TABLES
--- Source: Data Integration Specification v1.3 §8 (carried forward in force
+-- Source: Data Integration Specification v1.8 §8 (carried forward in force
 --         by v1.4 §8 and v1.6 §8). Status: [VERIFIED] except where noted.
 -- =====================================================================
 
--- obs.actuals_staging — Data Integration Spec v1.3 §8.1. [VERIFIED]
+-- obs.actuals_staging — Data Integration Spec v1.8 §8.1. [VERIFIED]
 CREATE TABLE obs.actuals_staging (
     ingestion_id                 TEXT NOT NULL,
     staging_id                   TEXT NOT NULL,
@@ -161,7 +161,7 @@ CREATE TABLE obs.actuals_staging (
     PRIMARY KEY (staging_id)
 );
 
--- obs.actuals — Data Integration Spec v1.3 §8.2. [VERIFIED]
+-- obs.actuals — Data Integration Spec v1.8 §8.2. [VERIFIED]
 -- Natural key: entity+year+month+cost_center+account+sub_account.
 -- Immutable: versioning via is_deleted (reporting filters is_deleted=FALSE).
 CREATE TABLE obs.actuals (
@@ -193,7 +193,7 @@ CREATE TABLE obs.actuals (
 -- The Implementation Guide money rule applies to OBS-computed money, not the
 -- raw source amount, which the spec explicitly types DOUBLE PRECISION.
 
--- obs.employees — Data Integration Spec v1.3 §8.3. [VERIFIED]
+-- obs.employees — Data Integration Spec v1.8 §8.3. [VERIFIED]
 -- Natural key: p_number + cost_center. Compensation columns are CONFIDENTIAL.
 CREATE TABLE obs.employees (
     employee_id           TEXT NOT NULL,   -- UUID, stable across updates
@@ -227,7 +227,7 @@ CREATE TABLE obs.employees (
     PRIMARY KEY (employee_id)
 );
 
--- obs.cost_center_hierarchy_nodes — Data Integration Spec v1.3 §8.4.1. [VERIFIED]
+-- obs.cost_center_hierarchy_nodes — Data Integration Spec v1.8 §8.4.1. [VERIFIED]
 CREATE TABLE obs.cost_center_hierarchy_nodes (
     node_id           TEXT NOT NULL,
     hierarchy_id      TEXT NOT NULL,
@@ -244,7 +244,7 @@ CREATE TABLE obs.cost_center_hierarchy_nodes (
     PRIMARY KEY (node_id)
 );
 
--- obs.cost_center_hierarchy_memberships — Data Integration Spec v1.3 §8.4.2. [VERIFIED]
+-- obs.cost_center_hierarchy_memberships — Data Integration Spec v1.8 §8.4.2. [VERIFIED]
 CREATE TABLE obs.cost_center_hierarchy_memberships (
     membership_id     TEXT NOT NULL,
     hierarchy_id      TEXT NOT NULL,
@@ -264,7 +264,7 @@ CREATE TABLE obs.cost_center_hierarchy_memberships (
     PRIMARY KEY (membership_id)
 );
 
--- obs.account_hierarchy_nodes — Data Integration Spec v1.3 §8.5.1. [VERIFIED]
+-- obs.account_hierarchy_nodes — Data Integration Spec v1.8 §8.5.1. [VERIFIED]
 -- Plus amendments from Workforce Planning FR v1.1 §3.3 (is_personnel_expense,
 -- personnel_expense_source).
 CREATE TABLE obs.account_hierarchy_nodes (
@@ -283,7 +283,7 @@ CREATE TABLE obs.account_hierarchy_nodes (
     PRIMARY KEY (node_id)
 );
 
--- obs.account_hierarchy_memberships — Data Integration Spec v1.3 §8.5.2. [VERIFIED]
+-- obs.account_hierarchy_memberships — Data Integration Spec v1.8 §8.5.2. [VERIFIED]
 CREATE TABLE obs.account_hierarchy_memberships (
     membership_id     TEXT NOT NULL,
     hierarchy_id      TEXT NOT NULL,
@@ -304,7 +304,7 @@ CREATE TABLE obs.account_hierarchy_memberships (
     PRIMARY KEY (membership_id)
 );
 
--- obs.ingestion_control — Data Integration Spec v1.3 §8.6. [VERIFIED]
+-- obs.ingestion_control — Data Integration Spec v1.8 §8.6. [VERIFIED]
 CREATE TABLE obs.ingestion_control (
     ingestion_id          TEXT NOT NULL,
     file_name             TEXT NOT NULL,
@@ -328,7 +328,7 @@ CREATE TABLE obs.ingestion_control (
     PRIMARY KEY (ingestion_id)
 );
 
--- obs.actuals_quarantine — Data Integration Spec v1.3 §8.7.1. [VERIFIED]
+-- obs.actuals_quarantine — Data Integration Spec v1.8 §8.7.1. [VERIFIED]
 -- = obs.actuals_staging columns + quarantine fields below.
 CREATE TABLE obs.actuals_quarantine (
     quarantine_id                TEXT NOT NULL,
@@ -362,7 +362,7 @@ CREATE TABLE obs.actuals_quarantine (
     PRIMARY KEY (quarantine_id)
 );
 
--- obs.employees_quarantine — Data Integration Spec v1.3 §8.7.2. [VERIFIED pattern]
+-- obs.employees_quarantine — Data Integration Spec v1.8 §8.7.2. [VERIFIED pattern]
 -- Same quarantine field pattern as obs.actuals_quarantine, with employee
 -- columns in place of actuals columns.
 CREATE TABLE obs.employees_quarantine (
@@ -399,7 +399,7 @@ CREATE TABLE obs.employees_quarantine (
     PRIMARY KEY (quarantine_id)
 );
 
--- obs.cost_center_hierarchy_quarantine — Data Integration Spec v1.3 §8.7.3. [VERIFIED pattern]
+-- obs.cost_center_hierarchy_quarantine — Data Integration Spec v1.8 §8.7.3. [VERIFIED pattern]
 CREATE TABLE obs.cost_center_hierarchy_quarantine (
     quarantine_id     TEXT NOT NULL,
     ingestion_id      TEXT NOT NULL,
@@ -421,7 +421,7 @@ CREATE TABLE obs.cost_center_hierarchy_quarantine (
     PRIMARY KEY (quarantine_id)
 );
 
--- obs.account_hierarchy_quarantine — Data Integration Spec v1.3 §8.7.4. [VERIFIED pattern]
+-- obs.account_hierarchy_quarantine — Data Integration Spec v1.8 §8.7.4. [VERIFIED pattern]
 CREATE TABLE obs.account_hierarchy_quarantine (
     quarantine_id     TEXT NOT NULL,
     ingestion_id      TEXT NOT NULL,
@@ -448,8 +448,8 @@ CREATE TABLE obs.account_hierarchy_quarantine (
 -- obs.cost_centers  and  obs.expense_accounts
 -- Status: [UNVERIFIED] — NO explicit CREATE TABLE exists in any available
 -- spec. Both are referenced as existing dimension tables in Data Integration
--- Spec validation rules (§7.3.2) and the Phase 0 table list, but neither the
--- v1.3/v1.4/v1.6 Data Integration spec nor the FR specs define their columns.
+-- Spec validation rules (§7.3.2) and the Phase 0 table list, but the FR specs
+-- don't define their columns.
 -- The columns below are DERIVED from usage (natural keys + names seen in
 -- validation and membership tables) and MUST be confirmed before use.
 -- Do not treat these as authoritative.
@@ -816,5 +816,5 @@ CREATE INDEX idx_notifications_user_unread_created
 -- =====================================================================
 -- END OF SCHEMA (PostgreSQL) — full obs.* table set per Phase 0 list, plus the
 -- hierarchy membership and quarantine tables revealed in Data Integration
--- Spec v1.3 §8.
+-- Spec v1.8 §8.
 -- =====================================================================
