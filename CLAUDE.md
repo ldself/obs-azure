@@ -117,7 +117,7 @@ Consult in this order when detail is needed on any topic.
 | Application Architecture Specification | v3.6 | Stack, component architecture, API conventions, calculation service pattern, audit log, performance targets. |
 | Security and Access Control Specification | v1.4 | Capability flags, cost center grants, 7-step authorization flow, audit events, error standards. |
 | UX and UI Specification | v1.5 | All screens, navigation, MUI choices, interaction patterns, UX acceptance criteria. |
-| Data Integration Specification | v1.6 | File format contracts, ingestion pipeline, dimension/actuals schemas, quarantine and re-promotion. |
+| Data Integration Specification | v1.8 | File format contracts, ingestion pipeline, dimension/actuals schemas, quarantine and re-promotion. |
 | Notification Mechanism Specification | v1.1 | `obs.notifications` schema, notification service, 8 events, bell + inbox UX, deep-link routing. |
 | FR: Budget Planning | v1.1 | Budget versions, lines, overhead allocation, vendor attribution, targets, locking, submission. |
 | FR: Workforce Planning | v1.1 | Positions, compensation calculations, lifecycle events, transfer workflow, personnel expense push. |
