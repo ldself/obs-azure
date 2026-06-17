@@ -119,6 +119,15 @@ venv.bak/
 .env.local
 frontend/.env.local
 
+# OBS local data (DuckDB file + landing-zone/archive/error substitutes for Blob Storage)
+local-data/
+
+# Azure Functions local settings (secrets)
+pipeline-functions/local.settings.json
+
+# macOS
+.DS_Store
+
 # Spyder project settings
 .spyderproject
 .spyproject

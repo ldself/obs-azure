@@ -217,6 +217,47 @@ CREATE TABLE obs.employees (
     PRIMARY KEY (employee_id)
 );
 
+-- obs.employees_staging — Build Sequencing Plan v1.2 §4.0.3 (source: Data
+-- Integration Spec v1.8). [DERIVED]
+-- §4.0.3 mandates this table exist, but DI v1.8 §8 defines column-level DDL
+-- only for obs.actuals_staging (§8.1) — there is NO §8.x employees_staging
+-- schema. Columns below are DERIVED by mirroring the employee source columns
+-- (as obs.employees_quarantine §8.7.2 preserves them) plus the staging
+-- envelope columns from the actuals_staging pattern (§8.1). Records land here
+-- in pipeline Step 4 and are promoted to obs.employees in Step 5, then deleted
+-- from staging after successful promotion. VERIFY columns if an authoritative
+-- employees_staging schema is published.
+CREATE TABLE obs.employees_staging (
+    ingestion_id          VARCHAR NOT NULL,
+    staging_id            VARCHAR NOT NULL,   -- UUID generated per staging record
+    p_number              VARCHAR NOT NULL,   -- part of natural key
+    company               VARCHAR NOT NULL,
+    entity                VARCHAR NOT NULL,
+    cost_center           VARCHAR NOT NULL,   -- part of natural key
+    department            VARCHAR NOT NULL,
+    last_name             VARCHAR NOT NULL,
+    first_name            VARCHAR NOT NULL,
+    last_hire_date        DATE NOT NULL,
+    salary_structure      VARCHAR NOT NULL,
+    title                 VARCHAR,
+    annual_salary         INTEGER NOT NULL,   -- CONFIDENTIAL (USD)
+    home_state            VARCHAR NOT NULL,
+    termination_date      DATE,
+    work_state            VARCHAR NOT NULL,
+    office                VARCHAR NOT NULL,
+    workplace_flexibility VARCHAR NOT NULL,
+    management_production VARCHAR NOT NULL,
+    job_grade             VARCHAR NOT NULL,
+    full_time_part_time   VARCHAR NOT NULL,
+    hours_worked          FLOAT,              -- CONFIDENTIAL
+    ot_hours_worked       FLOAT,              -- CONFIDENTIAL
+    fte                   FLOAT NOT NULL,
+    source_file_name      VARCHAR NOT NULL,
+    source_row_number     INTEGER NOT NULL,
+    staged_at             TIMESTAMP NOT NULL,
+    PRIMARY KEY (staging_id)
+);
+
 -- obs.cost_center_hierarchy_nodes — Data Integration Spec v1.8 §8.4.1. [VERIFIED]
 CREATE TABLE obs.cost_center_hierarchy_nodes (
     node_id           VARCHAR NOT NULL,

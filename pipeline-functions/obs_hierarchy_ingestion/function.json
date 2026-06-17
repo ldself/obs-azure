@@ -1,0 +1,12 @@
+{
+  "scriptFile": "__init__.py",
+  "bindings": [
+    {
+      "name": "inputBlob",
+      "type": "blobTrigger",
+      "direction": "in",
+      "path": "landing-hierarchies/{name}",
+      "connection": "BLOB_STORAGE_CONNECTION_STRING"
+    }
+  ]
+}
