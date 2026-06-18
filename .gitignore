@@ -4,6 +4,7 @@
 *.exe
 CLAUDE-ignore.md
 docs/~*.docx
+_api.zip
 
 ################################
 ########### FOLDERS ############

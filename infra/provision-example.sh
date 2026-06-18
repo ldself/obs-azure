@@ -32,15 +32,37 @@ az account set --subscription "$SUBSCRIPTION_ID"
 az group create --name "$RG" --location "$AZURE_REGION"
 
 echo "Provisioning Key Vault with ${KV_RET}-day retention..."
+# Access-policy permission model (not RBAC) so the §4.2/§4.3 `az keyvault set-policy`
+# grants below apply. Without this, subscriptions that default Key Vault to RBAC
+# would reject set-policy and the managed identities could not read secrets.
 az keyvault create --name "${RG}-kv" --resource-group "$RG" \
-  --retention-days "$KV_RET"
+  --retention-days "$KV_RET" --enable-rbac-authorization false
 
 # PostgreSQL Flexible Server (Cloud Migration v2.0 §3.2, tier-parameterized)
+# §3.2 pins the admin login to the literal "obsadmin" (PG_ADMIN_USER in tier.env);
+# the password is generated here, passed once to --admin-password, and persisted
+# only in Key Vault. §3.2 acceptance: "The admin password is not stored in any
+# file or CI/CD pipeline definition — Key Vault only." Never echo it; never write
+# it to tier.env. Complexity guaranteed: 28 alnum chars + one upper/lower/digit/symbol.
+PG_ADMIN_PASSWORD="$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 28)Aa1#"
 echo "Provisioning PostgreSQL Flexible Server (${PG_TIER} tier, ${PG_SKU} SKU, ${PG_STORAGE}GB storage, ${PG_BACKUP}-day backup retention, zonal resiliency: ${PG_ZONAL})..."
 az postgres flexible-server create --name "${RG}-pg" --resource-group "$RG" \
   --location "$AZURE_REGION" --sku-name "$PG_SKU" --tier "$PG_TIER" \
+  --admin-user "$PG_ADMIN_USER" --admin-password "$PG_ADMIN_PASSWORD" \
   --storage-size "$PG_STORAGE" --version 16 --zonal-resiliency "$PG_ZONAL" \
   --backup-retention "$PG_BACKUP"
+
+# Persist the connection string in Key Vault as obs-pg-connection-string
+# (Cloud Migration v2.0 §3.2 / §3.4 secret table). The App Service and Functions
+# managed identities read this secret at runtime (§4.2/§4.3); no static credential
+# lives in code or config. dbname=obs_db is created later by schema bootstrap.
+PG_FQDN="$(az postgres flexible-server show --name "${RG}-pg" --resource-group "$RG" \
+  --query fullyQualifiedDomainName -o tsv)"
+echo "Storing obs-pg-connection-string secret in ${RG}-kv..."
+az keyvault secret set --vault-name "${RG}-kv" --name obs-pg-connection-string \
+  --value "host=${PG_FQDN} port=5432 dbname=obs_db user=${PG_ADMIN_USER} password=${PG_ADMIN_PASSWORD} sslmode=require" \
+  --output none
+unset PG_ADMIN_PASSWORD
 
 # Always-on per phase: App Service + managed identity + Application Insights
 #### VALIDATE QUOTA LIMITS
@@ -50,11 +72,28 @@ az appservice plan create --name "${RG}-asp" --resource-group "$RG" \
 echo "Provisioning Web App..."
 az webapp create --name "${RG}-api" --resource-group "$RG" \
   --plan "${RG}-asp" --runtime PYTHON:3.11
-echo "Assigning managed identity..."
-az webapp identity assign --name "${RG}-api" --resource-group "$RG"
+echo "Assigning managed identity and granting Key Vault secret access (§4.2)..."
+APP_PRINCIPAL_ID="$(az webapp identity assign --name "${RG}-api" --resource-group "$RG" \
+  --query principalId -o tsv)"
+az keyvault set-policy --name "${RG}-kv" --object-id "$APP_PRINCIPAL_ID" \
+  --secret-permissions get list --output none
 echo "Creating Application Insights component..."
 az monitor app-insights component create --app "${RG}-ai" --location "$AZURE_REGION" \
   --resource-group "$RG" --application-type web
+
+# PostgreSQL firewall: allow the App Service outbound IPs (Cloud Migration v2.0 §4.5).
+# outboundIpAddresses is a comma-separated list; each gets its own single-IP rule.
+echo "Configuring PostgreSQL firewall for App Service outbound IPs (§4.5)..."
+APP_OUTBOUND_IPS="$(az webapp show --name "${RG}-api" --resource-group "$RG" \
+  --query outboundIpAddresses -o tsv)"
+IFS=',' read -ra _app_ips <<< "$APP_OUTBOUND_IPS"
+rule_n=0
+for ip in "${_app_ips[@]}"; do
+  rule_n=$((rule_n + 1))
+  az postgres flexible-server firewall-rule create --name "${RG}-pg" --resource-group "$RG" \
+    --rule-name "allow-app-service-${rule_n}" --start-ip-address "$ip" --end-ip-address "$ip" \
+    --output none
+done
 
 # Phase-gated resources per the §4 resource matrix of the Cloud Validation Strategy.
 # Static Web Apps: all UI-bearing phases.
@@ -82,7 +121,27 @@ case "$PHASE" in
       --sku Standard_LRS --kind StorageV2
     az functionapp create --name "${RG}-pipeline" --resource-group "$RG" \
       --consumption-plan-location "$AZURE_REGION" --runtime python --runtime-version 3.11 \
-      --functions-version 4 --os-type linux --storage-account "obsval${PHASE}fnstore";;
+      --functions-version 4 --os-type linux --storage-account "obsval${PHASE}fnstore"
+    echo "Assigning Functions managed identity and granting Key Vault secret access (§4.3)..."
+    FN_PRINCIPAL_ID="$(az functionapp identity assign --name "${RG}-pipeline" --resource-group "$RG" \
+      --query principalId -o tsv)"
+    az keyvault set-policy --name "${RG}-kv" --object-id "$FN_PRINCIPAL_ID" \
+      --secret-permissions get list --output none
+    # Functions MI needs blob read/write on the landing zone (Cloud Migration v2.0 §4.4).
+    # object-id + principal-type avoids the Graph lookup that can fail on AAD replication lag.
+    echo "Granting Functions managed identity Storage Blob Data Contributor on landing zone (§4.4)..."
+    LANDING_ID="$(az storage account show --name "obsval${PHASE}landing" --resource-group "$RG" \
+      --query id -o tsv)"
+    az role assignment create --assignee-object-id "$FN_PRINCIPAL_ID" \
+      --assignee-principal-type ServicePrincipal \
+      --role "Storage Blob Data Contributor" --scope "$LANDING_ID" --output none
+    # Functions on Consumption have dynamic outbound IPs; per §4.5's Claude Code note,
+    # allow Azure services through the PostgreSQL firewall for the validation tier
+    # (0.0.0.0/0.0.0.0 is the Azure-services rule). Tighten via VNet before production.
+    echo "Allowing Azure services through PostgreSQL firewall for Functions dynamic IPs (§4.5 note)..."
+    az postgres flexible-server firewall-rule create --name "${RG}-pg" --resource-group "$RG" \
+      --rule-name AllowAzureServices --start-ip-address 0.0.0.0 --end-ip-address 0.0.0.0 \
+      --output none;;
 esac
 
 echo "Provisioned $TIER tier for phase $PHASE into $RG"
