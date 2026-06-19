@@ -13,10 +13,12 @@ authentication and deploys to Azure on PostgreSQL with Microsoft Entra ID SSO.
 
 ## Status
 
-Early scaffold. Tooling, configuration, specifications, and the per-phase cloud-validation
-infrastructure are in place; application source under `backend/app/`, the pipeline, and the
-frontend are being built out phase by phase per the
-[Build Sequencing Plan](docs/OBS_Build_Sequencing_Plan_v1_2.docx) (10 phases).
+Phase 0 (infrastructure & platform foundations) is in place: the hosting-agnostic FastAPI
+stub with a `/health` endpoint, the DuckDB/PostgreSQL engine switch, schema bootstrap, the
+`RULE 8` `LOCAL_AUTH_BYPASS` safety check, pipeline and Azure Functions scaffolding, the
+Makefile, and the per-phase local + cloud validation harness. The business routers,
+authorization flow, calculation service, and frontend screens are built out phase by phase
+per the [Build Sequencing Plan](docs/OBS_Build_Sequencing_Plan_v1_2.docx) (10 phases).
 
 ---
 
@@ -40,14 +42,17 @@ environment is a faithful substitute for the cloud.
 ## Repository layout
 
 ```
-backend/        FastAPI app (auth, routers, services, db, models), pipeline/, tests/
-frontend/       React + TypeScript SPA (Vite, MUI)
-schema/         bootstrap.sql (DuckDB), bootstrap_pg.sql (PostgreSQL), seed/
-infra/          Azure CLI provisioning / deploy / teardown scripts (*-example templates tracked)
-docs/           Authoritative specifications (versioned .docx)
-local-data/     GIT-IGNORED: landing-zone/, archive/, error/, obs.duckdb
-.claude/agents/ Claude Code subagents (spec-librarian, phase-gate-checker, azure-lifecycle-operator)
-CLAUDE.md       Repo-root orientation, read first
+backend/           FastAPI app (auth, routers, services, db, models), pipeline/, tests/
+frontend/          React + TypeScript SPA (Vite, MUI)
+pipeline-functions/ Azure Functions for blob-triggered actuals/employees/hierarchy ingestion
+schema/            bootstrap.sql (DuckDB), bootstrap_pg.sql (PostgreSQL), seed/
+infra/             Azure CLI provision / deploy / teardown scripts (*-example templates tracked)
+phase_validation/  Per-phase local + cloud validation scripts (e.g. 00_foundations/)
+docs/              Authoritative specifications (versioned .docx)
+local-data/        GIT-IGNORED: landing-zone/, archive/, error/, obs.duckdb
+.claude/agents/    Claude Code subagents (spec-librarian, phase-gate-checker, azure-lifecycle-operator)
+Makefile           Local dev convenience commands (make help)
+CLAUDE.md          Repo-root orientation, read first
 ```
 
 ---
@@ -69,12 +74,19 @@ pip install -r requirements-dev.txt
 # 2. Environment configuration
 cp .env.local.example .env.local        # then review values; LOCAL_AUTH_BYPASS=true is localhost-only
 
-# 3. Run the backend (DuckDB + mock auth)
-uvicorn backend.app.main:app --reload --port 8000
+# 3. Initialize the local DuckDB database
+make dirs            # create local-data landing-zone / archive / error directories
+make db-bootstrap    # create the database from schema/bootstrap.sql
+make db-seed         # apply schema/seed/*.sql (or `make db-reset` to rebuild + reseed)
 
-# 4. Run the frontend (proxies /api/* to localhost:8000)
-cd frontend && npm install && npm run dev
+# 4. Run the backend (DuckDB + mock auth) at http://localhost:8000 (docs at /docs)
+make api
+
+# 5. Run the frontend (proxies /api/* to localhost:8000) at http://localhost:5173
+cd frontend && npm install && make frontend
 ```
+
+Run `make help` to list all convenience targets.
 
 Key `.env.local` settings (see [.env.local.example](.env.local.example) for the full set):
 
@@ -87,15 +99,15 @@ Key `.env.local` settings (see [.env.local.example](.env.local.example) for the 
 ## Quality checks
 
 ```bash
-ruff check .            # lint (auto-fix with --fix)
-ruff format .           # format
-mypy .                  # type check
-pytest                  # tests (pytest --cov for coverage)
+make lint               # ruff check backend
+make typecheck          # mypy backend/app
+make test               # all backend tests (or test-unit / test-integration)
+make ac-coverage        # verify every registered acceptance criterion has a passing test
 pre-commit run --all-files
 ```
 
-Conventions are config-enforced: 120-char lines, 4-space indent, one import per line,
-NumPy-style docstrings.
+`make test-integration` requires the backend running (`make api`). Conventions are
+config-enforced: 120-char lines, 4-space indent, one import per line, NumPy-style docstrings.
 
 ---
 
@@ -123,6 +135,11 @@ Per-phase loop (requires `az login`):
 
 The **azure-lifecycle-operator** subagent runs one step of this loop at a time; it never
 chains steps and never targets production resources.
+
+Per-phase validation scripts that exercise both the local stack and the cloud loop live
+under `phase_validation/<phase>/` (e.g. `phase_validation/00_foundations/local/` boots
+`make api` and asserts `/health`; `phase_validation/00_foundations/cloud/` drives the
+`infra/` provision → integration → teardown sequence).
 
 ---
 
