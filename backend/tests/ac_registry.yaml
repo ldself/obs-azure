@@ -32,3 +32,172 @@ phase_0:
   - id: AC-P0-ENTRA
     description: Entra ID app registration exists with correct local/prod redirect URIs.
     verification: infra
+
+phase_1:
+  # --- Authentication & login permission (Security Spec v1.4 §11.1) ---
+  - id: AC-AUTH-01
+    description: A request with no access token returns HTTP 401 on every API endpoint.
+    test: backend/tests/unit/test_auth_dependencies.py::test_invalid_token_is_401
+  - id: AC-AUTH-02
+    description: A request with an expired access token returns HTTP 401.
+    test: backend/tests/unit/test_token.py::test_expired_token_raises
+  - id: AC-AUTH-03
+    description: A valid Entra ID token for a user with no OBS registry record returns HTTP 403.
+    test: backend/tests/integration/test_users_api.py::test_unknown_user_forbidden
+  - id: AC-AUTH-04
+    description: A valid Entra ID token for a user with is_active = FALSE returns HTTP 403.
+    test: backend/tests/unit/test_auth_dependencies.py::test_inactive_user_is_403
+  - id: AC-AUTH-05
+    description: >-
+      A user whose is_active is set to FALSE cannot complete a new OBS login even
+      while their Entra ID account remains active.
+    test: backend/tests/unit/test_auth_dependencies.py::test_inactive_user_is_403
+  - id: AC-AUTH-06
+    description: >-
+      Refresh tokens are stored in httpOnly secure cookies and access tokens in
+      memory only — neither is accessible via localStorage. (BFF cookie set by
+      auth_routes; SPA AuthContext holds the access token in memory.)
+    verification: deferred
+    note: frontend/cloud auth path — checked by frontend-conventions-reviewer
+  - id: AC-AUTH-07
+    description: Logout revokes the refresh token and redirects to the Entra ID logout endpoint.
+    test: backend/tests/integration/test_users_api.py::test_logout_audits
+
+  # --- Capability flag enforcement (Security Spec v1.4 §11.2) ---
+  - id: AC-CAP-01
+    description: >-
+      is_administrator can read/write budget lines and positions for any cost
+      center without assignment. Mechanism: administrator short-circuit (Step 3).
+    verification: deferred
+    note: budget/position data surface in Phase 4/5; admin short-circuit unit-tested
+  - id: AC-CAP-02
+    description: is_administrator has implicit full access to all compensation data.
+    verification: deferred
+    note: position compensation surface in Phase 4; admin path unit-tested
+  - id: AC-CAP-03
+    description: System Modeler with no cost center assignments cannot read/write budget lines or positions.
+    verification: deferred
+    note: budget/position data surface in Phase 4/5; grant resolution unit-tested
+  - id: AC-CAP-04
+    description: Report Developer with no cost center assignments cannot read/write budget lines or positions.
+    verification: deferred
+    note: budget/position data surface in Phase 4/5; grant resolution unit-tested
+  - id: AC-CAP-05
+    description: System Modeler can write business rules configuration; others cannot.
+    verification: deferred
+    note: business-rules endpoints in Phase 3; require_capability mechanism unit-tested
+  - id: AC-CAP-06
+    description: Report Developer can create and publish report definitions; others cannot.
+    verification: deferred
+    note: report-definition endpoints in Phase 8; require_capability mechanism unit-tested
+  - id: AC-CAP-07
+    description: A user with both System Modeler and Report Developer has all combined capabilities.
+    test: backend/tests/unit/test_auth_dependencies.py::test_require_capability_allows_flag_holder
+  - id: AC-CAP-08
+    description: >-
+      The system prevents the last active Administrator from being deactivated or
+      having is_administrator set to FALSE.
+    test: backend/tests/integration/test_users_api.py::test_cannot_deactivate_last_active_administrator
+  - id: AC-CAP-09
+    description: >-
+      Finance Reviewer with no cost center assignments can access Finance Review
+      routes but receives no records in the Approval Queue.
+    verification: deferred
+    note: Finance Review module in Phase 6; flag gate unit-tested
+  - id: AC-CAP-10
+    description: >-
+      A user without is_finance_reviewer and without is_administrator calling any
+      Finance Review endpoint receives HTTP 403.
+    test: backend/tests/unit/test_auth_dependencies.py::test_require_capability_blocks_others
+  - id: AC-CAP-11
+    description: >-
+      Setting/clearing is_finance_reviewer generates a FINANCE_REVIEWER_FLAG_SET
+      audit event; only Administrator tokens may set/clear the flag.
+    test: backend/tests/integration/test_users_api.py::test_patch_emits_capability_and_login_and_finance_events
+
+  # --- Cost center access & grant enforcement (Security Spec v1.4 §11.3) ---
+  - id: AC-GRANT-01
+    description: A user with no cost center assignments cannot read or write any budget lines or positions.
+    test: backend/tests/unit/test_auth_dependencies.py::test_no_grant_returns_none
+  - id: AC-GRANT-02
+    description: ALL_READ standard grant on a cost center can read but not write that cost center.
+    test: backend/tests/unit/test_auth_dependencies.py::test_rollup_grant_resolves
+  - id: AC-GRANT-03
+    description: ALL_WRITE standard grant on a cost center can read and write that cost center.
+    test: backend/tests/unit/test_auth_dependencies.py::test_individual_grant_resolves
+  - id: AC-GRANT-04
+    description: A user assigned via a rollup can access all child cost centers of that rollup.
+    test: backend/tests/unit/test_auth_dependencies.py::test_rollup_grant_resolves
+  - id: AC-GRANT-05
+    description: A new cost center under a rollup is automatically accessible to rollup-assigned users.
+    test: backend/tests/unit/test_auth_dependencies.py::test_scope_predicate_includes_rollup_members
+  - id: AC-GRANT-06
+    description: A per-cost-center override within a rollup takes precedence over the rollup default.
+    test: backend/tests/unit/test_auth_dependencies.py::test_rollup_override_takes_precedence
+  - id: AC-GRANT-07
+    description: An individual cost center assignment takes precedence over any rollup-based grant.
+    test: backend/tests/unit/test_auth_dependencies.py::test_individual_grant_beats_rollup
+  - id: AC-GRANT-08
+    description: Cost center scope is applied in the SQL WHERE clause at query construction time.
+    test: backend/tests/unit/test_auth_dependencies.py::test_scope_predicate_lists_readable_cost_centers
+
+  # --- Confidential data enforcement (Security Spec v1.4 §11.4) ---
+  - id: AC-CONF-01
+    description: >-
+      ALL_NONE confidential grant yields no compensation fields in position
+      responses — fields are absent from the payload, not null.
+    test: backend/tests/unit/test_auth_dependencies.py::test_strip_confidential_for_all_none
+  - id: AC-CONF-02
+    description: ALL_NONE confidential grant cannot write compensation data — HTTP 403.
+    verification: deferred
+    note: position write surface in Phase 4; can_write_confidential mechanism unit-tested
+  - id: AC-CONF-03
+    description: ALL_READ confidential grant can read but not write compensation data.
+    test: backend/tests/unit/test_auth_dependencies.py::test_strip_confidential_kept_for_all_read
+  - id: AC-CONF-04
+    description: >-
+      A System Modeler/Report Developer with no assignment and no confidential
+      grant receives no compensation fields for any cost center.
+    test: backend/tests/unit/test_auth_dependencies.py::test_strip_confidential_for_no_grant
+  - id: AC-CONF-05
+    description: An Administrator receives full compensation data for all cost centers without a grant.
+    verification: deferred
+    note: position surface in Phase 4; admin path unit-tested
+  - id: AC-CONF-06
+    description: Excel export excludes compensation columns where the exporter has ALL_NONE.
+    verification: deferred
+    note: Excel export in Phase 8; strip mechanism unit-tested
+  - id: AC-CONF-07
+    description: >-
+      A Finance Reviewer with ALL_NONE confidential grant receives no compensation
+      fields in the finance-review budget_summary payload.
+    verification: deferred
+    note: Finance Review module in Phase 6; strip mechanism unit-tested
+
+  # --- Audit log (Security Spec v1.4 §11.5) ---
+  - id: AC-AUDIT-01
+    description: Every login permission grant and revocation generates an audit record.
+    test: backend/tests/integration/test_users_api.py::test_patch_emits_capability_and_login_and_finance_events
+  - id: AC-AUDIT-02
+    description: Every capability flag change generates an audit record capturing previous and new state.
+    test: backend/tests/unit/test_audit_service.py::test_previous_and_new_values_are_json
+  - id: AC-AUDIT-03
+    description: Every cost center grant addition, modification, and removal generates an audit record.
+    test: backend/tests/integration/test_users_api.py::test_grant_lifecycle_and_audit
+  - id: AC-AUDIT-04
+    description: Every login and login denial generates an audit record.
+    test: backend/tests/integration/test_users_api.py::test_me_returns_profile_and_audits_login
+  - id: AC-AUDIT-05
+    description: >-
+      Audit records cannot be updated or deleted via any API endpoint or direct
+      PostgreSQL write; the BEFORE UPDATE OR DELETE trigger rejects such ops.
+    verification: infra
+  - id: AC-AUDIT-06
+    description: >-
+      A cost-center-only user (or finance-reviewer-only user) cannot read the
+      audit log.
+    verification: deferred
+    note: audit-log read endpoint/UI in Phase 9; capability gate mechanism unit-tested
+  - id: AC-AUDIT-07
+    description: Audit records are retained for a minimum of 3 years (PostgreSQL retention policy).
+    verification: infra

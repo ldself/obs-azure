@@ -1,10 +1,15 @@
 # OBS — local developer convenience commands (Local Dev Environment Spec v1.1 §8.5).
 # DuckDB is the local engine; the same code runs against Azure PostgreSQL in the cloud.
 
-PYTHON ?= python
+# All Python tooling runs through the repo virtualenv by default, so `make` targets
+# work without activating it. Override if your venv lives elsewhere, e.g.
+#   make test VENV=/path/to/venv   or   make test PYTHON=python
+VENV ?= .venv
+PYTHON ?= $(VENV)/bin/python
 DUCKDB_PATH ?= ./local-data/obs.duckdb
 
-.PHONY: help api frontend db-bootstrap db-seed db-reset dirs \
+.PHONY: help api frontend frontend-install frontend-lint frontend-typecheck \
+        frontend-build db-bootstrap db-seed db-reset dirs \
         pipeline-actuals pipeline-employees pipeline-hierarchy \
         test test-unit test-integration lint typecheck ac-coverage
 
@@ -13,10 +18,22 @@ help:
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  %-20s %s\n", $$1, $$2}'
 
 api: ## Run the FastAPI backend (http://localhost:8000, docs at /docs, health at /health)
-	uvicorn backend.app.main:app --reload --port 8000
+	$(PYTHON) -m uvicorn backend.app.main:app --reload --port 8000
 
 frontend: ## Run the Vite frontend dev server (http://localhost:5173)
 	cd frontend && npm run dev
+
+frontend-install: ## Install frontend npm dependencies
+	cd frontend && npm install
+
+frontend-lint: ## Lint the frontend with ESLint (strict; no warnings)
+	cd frontend && npm run lint
+
+frontend-typecheck: ## Type-check the frontend with tsc (strict, no emit)
+	cd frontend && npm run typecheck
+
+frontend-build: ## Production build of the frontend SPA
+	cd frontend && npm run build
 
 dirs: ## Create the local-data landing-zone / archive / error directories
 	mkdir -p local-data/landing-zone/actuals \
@@ -63,11 +80,15 @@ test-unit: ## Run unit tests
 test-integration: ## Run integration tests (requires `make api` running)
 	$(PYTHON) -m pytest backend/tests/integration
 
-lint: ## Lint the backend with ruff
-	ruff check backend
+lint: ## Lint the backend (ruff) and, if installed, the frontend (ESLint)
+	$(PYTHON) -m ruff check backend
+	@if [ -d frontend/node_modules ]; then $(MAKE) frontend-lint; \
+	else echo "skipping frontend-lint (run 'make frontend-install' first)"; fi
 
-typecheck: ## Type-check the backend with mypy
-	mypy backend/app
+typecheck: ## Type-check the backend (mypy) and, if installed, the frontend (tsc)
+	$(PYTHON) -m mypy backend/app
+	@if [ -d frontend/node_modules ]; then $(MAKE) frontend-typecheck; \
+	else echo "skipping frontend-typecheck (run 'make frontend-install' first)"; fi
 
 ac-coverage: ## Verify every registered acceptance criterion has a passing test
 	$(PYTHON) -m backend.tests.check_ac_coverage

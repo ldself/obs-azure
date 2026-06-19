@@ -73,6 +73,21 @@ convention = "numpy"
 allow-star-arg-any = true
 ignore-fully-untyped = true
 
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection markers are the idiomatic way to declare route
+# parameters and are evaluated once at import; they are not mutable defaults (B008).
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Security",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Header",
+    "fastapi.Cookie",
+    "fastapi.Body",
+    "fastapi.Form",
+    "fastapi.File",
+]
+
 [tool.ruff.lint.pylint]
 max-args = 5
 max-branches = 12

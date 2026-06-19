@@ -121,6 +121,11 @@ venv.bak/
 frontend/.env.local
 infra/tier.env
 
+# Frontend (Node / Vite)
+node_modules/
+frontend/dist/
+frontend/node_modules/
+
 # OBS local data (DuckDB file + landing-zone/archive/error substitutes for Blob Storage)
 local-data/
 
