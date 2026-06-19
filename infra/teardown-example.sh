@@ -21,7 +21,17 @@ if [[ "$RG" == obs-prod* ]]; then
   echo 'REFUSED: target resolves to a production-named group.' >&2; exit 1; fi
 
 az account set --subscription "$SUBSCRIPTION_ID"
+
+echo "Tearing down validation tier for phase $PHASE by deleting resource group $RG..."
 az group delete --name "$RG" --yes
+
+# Purge the now soft-deleted Key Vault so its globally-unique name is free to
+# recreate on the next provision (validation vaults carry no purge protection).
+KV="${RG}-kv"
+if [[ -n "$(az keyvault list-deleted --query "[?name=='$KV'].name" -o tsv)" ]]; then
+  echo "Purging soft-deleted Key Vault $KV..."
+  az keyvault purge --name "$KV"
+fi
 
 # Verify zero residual resources.
 if [[ "$(az group exists --name "$RG")" == "true" ]]; then

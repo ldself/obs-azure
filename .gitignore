@@ -4,6 +4,7 @@
 *.exe
 CLAUDE-ignore.md
 docs/~*.docx
+_api.zip
 
 ################################
 ########### FOLDERS ############
@@ -118,6 +119,16 @@ env.bak/
 venv.bak/
 .env.local
 frontend/.env.local
+infra/tier.env
+
+# OBS local data (DuckDB file + landing-zone/archive/error substitutes for Blob Storage)
+local-data/
+
+# Azure Functions local settings (secrets)
+pipeline-functions/local.settings.json
+
+# macOS
+.DS_Store
 
 # Spyder project settings
 .spyderproject
@@ -142,3 +153,10 @@ frontend/.env.local
 .vscode/c_cpp_properties.json
 *.code-workspace
 .history
+
+################################
+###### PROVISIONING CODE #######
+################################
+infra/provision.sh
+infra/teardown.sh
+infra/deploy.sh

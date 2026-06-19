@@ -1,0 +1,19 @@
+# OBS backend API — runtime dependencies (Architecture Spec v3.6 §2.4).
+# Python 3.11. The API codebase is hosting-agnostic; only DB_ENGINE selects the
+# local DuckDB path vs the Azure PostgreSQL path at runtime.
+
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.7.0
+pydantic-settings>=2.3.0
+python-dotenv>=1.0.1
+
+# Local database engine (DB_ENGINE=duckdb)
+duckdb>=0.10.0
+
+# Production database engine (DB_ENGINE=postgresql)
+psycopg2-binary>=2.9.9
+
+# Data handling / server-side Excel export (openpyxl per RULE: never client-side)
+pandas>=2.2.0
+openpyxl>=3.1.0

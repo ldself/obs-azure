@@ -1,0 +1,7 @@
+# Azure Functions ingestion app — pipeline-specific dependencies
+# (Azure Cloud Migration Spec v2.0 §8.2). Python 3.11, Functions runtime v4.
+azure-functions
+azure-storage-blob
+psycopg2-binary
+pandas
+openpyxl

@@ -1,0 +1,1 @@
+"""OBS FastAPI application package."""
