@@ -36,7 +36,7 @@ abbreviated in the glossary. Use `cost_center_id` not `cc_id`; `is_finance_revie
 `finance_reviewer_flag`; `ALL_WRITE` not `write_access`.
 
 **RULE 2 — Architecture decisions are final.** The technology stack, hosting model,
-authentication approach, data platform, and all decisions in Project Context Handoff v2.4
+authentication approach, data platform, and all decisions in Project Context Handoff v2.6
 are final. Do not propose alternative frameworks, databases, or approaches. If you believe
 a spec contains an error or contradiction, STOP and raise it as a question.
 
@@ -84,6 +84,21 @@ SHA-256 content hash + file name as the deduplication key in `obs.ingestion_cont
 
 ---
 
+## Phase 1 Active Conventions
+
+Phase 1 — Authentication, User Registry & Security Core — is now **In Progress**.
+
+- The 7-step authorization flow (Security Spec v1.4 §9.1) is now enforced on every
+  endpoint. Confirm all 7 steps are present and ordered on every router added this phase.
+- Error codes follow Security Spec v1.4 §9.2: 401 (invalid/missing token), 403
+  (insufficient permission or inactive user), 404 (genuinely non-existent resource only),
+  409 (conflict), 422 (validation error).
+- Run the **auth-flow-reviewer** subagent after implementing each endpoint batch.
+- Run the **frontend-conventions-reviewer** subagent after implementing each UI component.
+- Run the **terminology-guard** subagent over any new schema or model file.
+
+---
+
 ## Technology Stack (do not deviate)
 
 All decisions final (Architecture Spec v3.6 §2.4).
@@ -112,7 +127,7 @@ Consult in this order when detail is needed on any topic.
 
 | Document | Version | What it governs |
 |---|---|---|
-| Project Context Handoff | v2.4 | All decisions, open-item resolutions, authoritative reading order. Read first in any new session. |
+| Project Context Handoff | v2.6 | All decisions, open-item resolutions, authoritative reading order. Read first in any new session. |
 | System Context and Domain Glossary | v1.11 | Authoritative terminology. Every term in code, APIs, schemas, UI must match exactly. |
 | Application Architecture Specification | v3.6 | Stack, component architecture, API conventions, calculation service pattern, audit log, performance targets. |
 | Security and Access Control Specification | v1.4 | Capability flags, cost center grants, 7-step authorization flow, audit events, error standards. |
@@ -191,7 +206,8 @@ No phase is complete with any unchecked item. Full checklist in Implementation G
 
 ## Subagents
 
-Active subagents live in `.claude/agents/`. The starter set is **spec-librarian**,
-**phase-gate-checker**, and **azure-lifecycle-operator**. Additional review agents
-(terminology-guard, auth-flow-reviewer, audit-and-idempotency-reviewer, calculation-verifier,
-frontend-conventions-reviewer) are added at the phases noted in the Subagents Specification.
+Active subagents live in `.claude/agents/`. As of Phase 1, the active set is
+**spec-librarian**, **phase-gate-checker**, **azure-lifecycle-operator**,
+**terminology-guard**, **auth-flow-reviewer**, and **frontend-conventions-reviewer**.
+Additional review agents (audit-and-idempotency-reviewer, calculation-verifier) are added
+at the phases noted in the Subagents Specification v0.2.
