@@ -147,3 +147,8 @@ exclude = ["docs", "test", "tests"]
 pythonpath = ["."]
 testpaths = ["backend/tests"]
 addopts = "-ra"
+filterwarnings = [
+    # starlette>=1.3 prefers an httpx2 package and warns when falling back to httpx.
+    # Cosmetic; tests run correctly against httpx. Remove if/when we adopt httpx2.
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning",
+]
