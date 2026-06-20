@@ -18,20 +18,40 @@ if [[ "$TIER" == "validation" ]]; then RG="obs-val-${PHASE}-rg"; else RG="obs-pr
 
 az account set --subscription "$SUBSCRIPTION_ID"
 
+# Store secrets in Key Vault (Cloud Migration v2.0 §10: secrets via Key Vault managed identity).
+# The deploy script reads secrets from the environment (tier.env) and stores them in Key Vault.
+# The app then references them via Key Vault URIs, so the secrets never appear in app settings.
+echo "Storing secrets in Key Vault..."
+KV_URI="$(az keyvault show --name "${RG}-kv" --resource-group "$RG" --query properties.vaultUri -o tsv)"
+if [[ -n "$ENTRA_CLIENT_SECRET" ]]; then
+  az keyvault secret set --vault-name "${RG}-kv" --name obs-entra-client-secret --value "$ENTRA_CLIENT_SECRET" >/dev/null
+fi
+
 # App settings: enforce the production configuration contract. Note LOCAL_AUTH_BYPASS is
 # deliberately NOT set — the startup assertion (RULE 8) must see it absent off localhost.
-# PG_CONNECTION_STRING is injected as a Key Vault reference (Cloud Migration v2.0 §10):
-# App Service resolves it at runtime via the managed identity granted in provision.sh
-# (§4.2). The secret value never appears in app settings, the portal, or code.
-echo "Configuring API app settings with Key Vault reference to the PostgreSQL connection string secret..."
-KV_URI="$(az keyvault show --name "${RG}-kv" --resource-group "$RG" --query properties.vaultUri -o tsv)"
+# PG_CONNECTION_STRING and ENTRA_CLIENT_SECRET are injected as Key Vault references
+# (Cloud Migration v2.0 §10): App Service resolves them at runtime via the managed
+# identity granted in provision.sh (§4.2). The secret values never appear in app
+# settings, the portal, or code.
+echo "Configuring API app settings with Key Vault references..."
+SWA_URL="$(az staticwebapp show --name "${RG}-swa" --resource-group "$RG" --query 'defaultHostname' -o tsv 2>/dev/null || echo '')"
+ENTRA_REDIRECT_URI="https://${SWA_URL:-$(az webapp show --name "${RG}-api" --resource-group "$RG" --query defaultHostName -o tsv)}/api/v1/auth/callback"
+FRONTEND_BASE_URL="https://${SWA_URL:-$(az webapp show --name "${RG}-api" --resource-group "$RG" --query defaultHostName -o tsv)}"
 az webapp config appsettings set --name "${RG}-api" --resource-group "$RG" --settings \
   DB_ENGINE=postgresql \
   "PG_CONNECTION_STRING=@Microsoft.KeyVault(SecretUri=${KV_URI}secrets/obs-pg-connection-string/)" \
+  "ENTRA_CLIENT_SECRET=@Microsoft.KeyVault(SecretUri=${KV_URI}secrets/obs-entra-client-secret/)" \
   ENTRA_TENANT_ID="$ENTRA_TENANT_ID" \
   ENTRA_CLIENT_ID="$ENTRA_CLIENT_ID" \
+  ENTRA_REDIRECT_URI="$ENTRA_REDIRECT_URI" \
+  FRONTEND_BASE_URL="$FRONTEND_BASE_URL" \
+  CORS_ALLOWED_ORIGINS="$FRONTEND_BASE_URL" \
   KEY_VAULT_NAME="${RG}-kv" \
   SCM_DO_BUILD_DURING_DEPLOYMENT=true
+echo "Set ENTRA_REDIRECT_URI to: $ENTRA_REDIRECT_URI"
+echo "Set FRONTEND_BASE_URL to: $FRONTEND_BASE_URL"
+echo "Waiting for app settings to take effect..."
+sleep 20
 
 # Startup command (Cloud Migration v2.0 §3.5). App Service cannot guess the module
 # path; without this, Oryx's default gunicorn guess never finds the API and the site
@@ -69,24 +89,50 @@ fi
 
 # Deploy the API code. The site root must contain the backend/ package DIRECTORY
 # (the startup command imports backend.app.main:app and main.py uses absolute
-# `from backend.app...` imports), plus a requirements.txt at the root for Oryx to
-# install runtime deps. Stage both in a temp dir, then zip from there.
+# `from backend.app...` imports), plus requirements.txt and runtime.txt at the root
+# for Oryx to detect Python and install runtime deps. Stage all in a temp dir, then
+# zip from there. Exclude node_modules, __pycache__, .git, and other build artifacts
+# to minimize upload size and deployment time.
 echo "Deploying API code to Web App..."
-STAGE="$(mktemp -d)"
-cp -R backend "$STAGE/backend"
-cp backend/requirements.txt "$STAGE/requirements.txt"
-( cd "$STAGE" && zip -r "$OLDPWD/_api.zip" . -x '*/__pycache__/*' >/dev/null )
-rm -rf "$STAGE"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_ROOT"
+zip -r "$OLDPWD/_api.zip" backend runtime.txt \
+  -x '*/__pycache__/*' '*/.*' '*/node_modules/*' '*/.pytest_cache/*' '*.egg-info/*' >/dev/null
+zip "$OLDPWD/_api.zip" -j backend/requirements.txt
+cd "$OLDPWD"
 az webapp deploy --name "${RG}-api" --resource-group "$RG" --src-path _api.zip --type zip
+
+echo "Waiting for API to be ready..."
+API_HOSTNAME="$(az webapp show --name "${RG}-api" --resource-group "$RG" --query defaultHostName -o tsv)"
+MAX_RETRIES=120
+RETRY=0
+until curl -sf "https://${API_HOSTNAME}/" >/dev/null 2>&1 || [[ $RETRY -ge $MAX_RETRIES ]]; do
+  echo "  Attempt $((RETRY+1))/$MAX_RETRIES..."
+  sleep 2
+  RETRY=$((RETRY+1))
+done
+if [[ $RETRY -ge $MAX_RETRIES ]]; then
+  echo "WARNING: API did not respond after ${MAX_RETRIES} retries (continuing anyway)" >&2
+else
+  echo "API is responding."
+fi
 rm -f _api.zip
 
 # Deploy the frontend to Static Web Apps where the phase has a UI surface.
 case "$PHASE" in
-  3|4|5|6|7|8|9)
+  1|3|4|5|6|7|8|9)
     echo "Deploying frontend to Static Web App..."
-    ( cd frontend && npm ci && npm run build )
+    ( cd frontend && npm ci && VITE_AUTH_ENABLED=true npm run build )
     SWA_TOKEN="$(az staticwebapp secrets list --name "${RG}-swa" --resource-group "$RG" --query 'properties.apiKey' -o tsv)"
-    npx --yes @azure/static-web-apps-cli deploy frontend/dist --deployment-token "$SWA_TOKEN" --env production;;
+    npx --yes @azure/static-web-apps-cli deploy frontend/dist --deployment-token "$SWA_TOKEN" --env production
+    echo "Linking App Service backend to Static Web App..."
+    API_HOSTNAME="$(az webapp show --name "${RG}-api" --resource-group "$RG" --query defaultHostName -o tsv)"
+    az staticwebapp backends link \
+      --name "${RG}-swa" \
+      --resource-group "$RG" \
+      --backend-resource-id "$(az webapp show --name "${RG}-api" --resource-group "$RG" --query id -o tsv)" \
+      --backend-region "$(az webapp show --name "${RG}-api" --resource-group "$RG" --query location -o tsv)"
+    echo "Linked App Service backend: https://${API_HOSTNAME}";;
 esac
 
 # Deploy the Functions pipeline where the phase requires it.

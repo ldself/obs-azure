@@ -72,6 +72,9 @@ az appservice plan create --name "${RG}-asp" --resource-group "$RG" \
 echo "Provisioning Web App..."
 az webapp create --name "${RG}-api" --resource-group "$RG" \
   --plan "${RG}-asp" --runtime PYTHON:3.11
+echo "Disabling App Service platform-level authentication (letting FastAPI handle auth)..."
+az webapp auth-classic update --name "${RG}-api" --resource-group "$RG" \
+  --enabled false
 echo "Assigning managed identity and granting Key Vault secret access (§4.2)..."
 APP_PRINCIPAL_ID="$(az webapp identity assign --name "${RG}-api" --resource-group "$RG" \
   --query principalId -o tsv)"
@@ -98,7 +101,7 @@ done
 # Phase-gated resources per the §4 resource matrix of the Cloud Validation Strategy.
 # Static Web Apps: all UI-bearing phases.
 case "$PHASE" in
-  0|3|4|5|6|7|8|9)
+  0|1|2|3|4|5|6|7|8|9)
     echo "Provisioning Static Web App (${SWA_SKU} SKU)..."
     az staticwebapp create --name "${RG}-swa" --resource-group "$RG" \
       --sku "$SWA_SKU" --location "$AZURE_REGION";;

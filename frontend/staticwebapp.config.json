@@ -1,0 +1,9 @@
+{
+  "navigationFallback": {
+    "rewrite": "/index.html",
+    "exclude": ["/api/*", "/*.{js,css,png,ico,svg,woff2}"]
+  },
+  "globalHeaders": {
+    "Cache-Control": "no-store"
+  }
+}

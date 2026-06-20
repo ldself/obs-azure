@@ -20,6 +20,7 @@ backend with LOCAL_AUTH_BYPASS=true, so the OIDC round-trip is skipped entirely.
 from __future__ import annotations
 
 import secrets
+from urllib.parse import quote
 
 from fastapi import APIRouter
 from fastapi import HTTPException
@@ -56,15 +57,22 @@ def _clear_refresh_cookie(response: Response) -> None:
 
 
 @router.get("/login")
-def login() -> RedirectResponse:
+def login(request: Request) -> RedirectResponse:
     """Begin the OIDC login by redirecting to Entra (or the SPA locally)."""
     if settings.local_auth_bypass:
         return RedirectResponse(url=settings.frontend_base_url)
     state = secrets.token_urlsafe(16)
+    redirect_uri = settings.entra_redirect_uri
+    if not redirect_uri:
+        forwarded_host = request.headers.get("x-forwarded-host", "").split(",")[0].strip()
+        if forwarded_host:
+            redirect_uri = f"https://{forwarded_host}/api/v1/auth/callback"
+        else:
+            redirect_uri = f"{str(request.base_url).rstrip('/')}/api/v1/auth/callback"
     params = (
         f"client_id={settings.entra_client_id}"
         "&response_type=code"
-        f"&redirect_uri={settings.entra_redirect_uri}"
+        f"&redirect_uri={quote(redirect_uri, safe='')}"
         "&response_mode=query"
         f"&scope=openid profile email offline_access {settings.entra_client_id}/.default"
         f"&state={state}"
