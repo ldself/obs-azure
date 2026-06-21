@@ -16,9 +16,8 @@ while [[ $# -gt 0 ]]; do case "$1" in
 
 if [[ "$TIER" == "validation" ]]; then RG="obs-val-${PHASE}-rg"; else RG="obs-prod-rg"; fi
 
-# Allow custom resource names (e.g., obs-validation-api, obs-validation) instead of phase-based
-APP_SERVICE_NAME="${CUSTOM_APP_SERVICE_NAME:-${RG}-api}"
-SWA_NAME="${CUSTOM_SWA_NAME:-${RG}-swa}"
+APP_SERVICE_NAME="${RG}-api"
+SWA_NAME="${RG}-swa"
 
 az account set --subscription "$SUBSCRIPTION_ID"
 
