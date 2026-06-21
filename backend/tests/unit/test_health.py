@@ -12,8 +12,8 @@ client = TestClient(app)
 
 
 def test_health_returns_200() -> None:
-    """AC-P0-HEALTH: GET /health returns HTTP 200 (Build Sequencing Plan §4.0.4)."""
-    response = client.get("/health")
+    """AC-P0-HEALTH: GET /api/health returns HTTP 200 (Build Sequencing Plan §4.0.4)."""
+    response = client.get("/api/health")
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ok"

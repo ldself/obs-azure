@@ -19,9 +19,9 @@ API_BASE_URL = os.environ.get("OBS_API_BASE_URL", "http://localhost:8000")
 
 
 def test_health_endpoint_live() -> None:
-    """GET /health on the running API returns HTTP 200 (Build Plan §4.0.4)."""
+    """GET /api/health on the running API returns HTTP 200 (Build Plan §4.0.4)."""
     try:
-        with urllib.request.urlopen(f"{API_BASE_URL}/health", timeout=2) as resp:
+        with urllib.request.urlopen(f"{API_BASE_URL}/api/health", timeout=2) as resp:
             assert resp.status == 200
     except urllib.error.URLError as exc:
         pytest.skip(f"API not running at {API_BASE_URL} ({exc}); start it with `make api`.")

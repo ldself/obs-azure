@@ -3,7 +3,7 @@
 Phase 1 scope: the security core. On top of the Phase 0 health stub and engine
 switch, this wires the user-registry / grant routers and the BFF OIDC auth
 routes. Every business endpoint enforces the §9.1 seven-step authorization flow
-via the dependencies in ``backend.app.auth``; ``/health`` remains the only
+via the dependencies in ``backend.app.auth``; ``/api/health`` remains the only
 unauthenticated endpoint (Build Sequencing Plan v1.2 §4.1.3).
 """
 
@@ -92,25 +92,24 @@ app.add_middleware(
 )
 
 
-# Define an HTTP endpoint. The decorator `@app.get("/health")` registers this function
-# to handle GET requests to the URL path "/health". `tags=["platform"]` just groups it
+# Define an HTTP endpoint. The decorator `@app.get("/api/health")` registers this function
+# to handle GET requests to the URL path "/api/health". `tags=["platform"]` just groups it
 # under "platform" in the /docs page. Whatever the function returns becomes the JSON
 # response body. This is the only endpoint in Phase 0.
-@app.get("/health", tags=["platform"])
+@app.get("/api/health", tags=["platform"])
 def health() -> dict[str, str]:
     """Liveness probe for load balancers and monitoring.
 
     Returns HTTP 200 with the active engine. Intentionally does not depend on a
     database connection so the probe stays stable before the schema is
-    bootstrapped (Build Sequencing Plan v1.2 §4.0.4). This is the only
-    unauthenticated endpoint (§4.1.3).
+    bootstrapped. This is the only unauthenticated endpoint.
     """
     return {"status": "ok", "engine": engine.engine_name()}
 
 
 # Phase 1 routers. The BFF auth routes own the OIDC code exchange and the
 # httpOnly refresh cookie (Security Spec v1.4 §6); the users router exposes the
-# §4.1.3 registry + grant endpoints. Every route except /health enforces the
+# §4.1.3 registry + grant endpoints. Every route except /api/health enforces the
 # §9.1 authorization flow via backend.app.auth dependencies.
 app.include_router(auth_routes.router)
 app.include_router(users.router)
