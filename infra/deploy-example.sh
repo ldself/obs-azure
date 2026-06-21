@@ -16,6 +16,10 @@ while [[ $# -gt 0 ]]; do case "$1" in
 
 if [[ "$TIER" == "validation" ]]; then RG="obs-val-${PHASE}-rg"; else RG="obs-prod-rg"; fi
 
+# Allow custom resource names (e.g., obs-validation-api, obs-validation) instead of phase-based
+APP_SERVICE_NAME="${CUSTOM_APP_SERVICE_NAME:-${RG}-api}"
+SWA_NAME="${CUSTOM_SWA_NAME:-${RG}-swa}"
+
 az account set --subscription "$SUBSCRIPTION_ID"
 
 # Store secrets in Key Vault (Cloud Migration v2.0 §10: secrets via Key Vault managed identity).
@@ -29,27 +33,23 @@ fi
 
 # App settings: enforce the production configuration contract. Note LOCAL_AUTH_BYPASS is
 # deliberately NOT set — the startup assertion (RULE 8) must see it absent off localhost.
-# PG_CONNECTION_STRING and ENTRA_CLIENT_SECRET are injected as Key Vault references
-# (Cloud Migration v2.0 §10): App Service resolves them at runtime via the managed
-# identity granted in provision.sh (§4.2). The secret values never appear in app
-# settings, the portal, or code.
+# All configuration is injected as Key Vault references (Cloud Migration v2.0 §10): App
+# Service resolves them at runtime via the managed identity granted in provision.sh (§4.2).
+# The secret values and URLs never appear in app settings, the portal, or code.
+# ENTRA_REDIRECT_URI and FRONTEND_BASE_URL are read from Key Vault, not regenerated.
 echo "Configuring API app settings with Key Vault references..."
-SWA_URL="$(az staticwebapp show --name "${RG}-swa" --resource-group "$RG" --query 'defaultHostname' -o tsv 2>/dev/null || echo '')"
-ENTRA_REDIRECT_URI="https://${SWA_URL:-$(az webapp show --name "${RG}-api" --resource-group "$RG" --query defaultHostName -o tsv)}/api/v1/auth/callback"
-FRONTEND_BASE_URL="https://${SWA_URL:-$(az webapp show --name "${RG}-api" --resource-group "$RG" --query defaultHostName -o tsv)}"
-az webapp config appsettings set --name "${RG}-api" --resource-group "$RG" --settings \
+az webapp config appsettings set --name "$APP_SERVICE_NAME" --resource-group "$RG" --settings \
   DB_ENGINE=postgresql \
-  "PG_CONNECTION_STRING=@Microsoft.KeyVault(SecretUri=${KV_URI}secrets/obs-pg-connection-string/)" \
+  "POSTGRESQL_DSN=@Microsoft.KeyVault(SecretUri=${KV_URI}secrets/obs-pg-connection-string/)" \
   "ENTRA_CLIENT_SECRET=@Microsoft.KeyVault(SecretUri=${KV_URI}secrets/obs-entra-client-secret/)" \
+  "ENTRA_REDIRECT_URI=@Microsoft.KeyVault(SecretUri=${KV_URI}secrets/obs-entra-redirect-uri/)" \
+  "FRONTEND_BASE_URL=@Microsoft.KeyVault(SecretUri=${KV_URI}secrets/obs-frontend-base-url/)" \
+  "CORS_ALLOWED_ORIGINS=@Microsoft.KeyVault(SecretUri=${KV_URI}secrets/obs-frontend-base-url/)" \
   ENTRA_TENANT_ID="$ENTRA_TENANT_ID" \
   ENTRA_CLIENT_ID="$ENTRA_CLIENT_ID" \
-  ENTRA_REDIRECT_URI="$ENTRA_REDIRECT_URI" \
-  FRONTEND_BASE_URL="$FRONTEND_BASE_URL" \
-  CORS_ALLOWED_ORIGINS="$FRONTEND_BASE_URL" \
   KEY_VAULT_NAME="${RG}-kv" \
   SCM_DO_BUILD_DURING_DEPLOYMENT=true
-echo "Set ENTRA_REDIRECT_URI to: $ENTRA_REDIRECT_URI"
-echo "Set FRONTEND_BASE_URL to: $FRONTEND_BASE_URL"
+echo "Set app settings with Key Vault references (ENTRA_REDIRECT_URI and FRONTEND_BASE_URL from Key Vault)"
 echo "Waiting for app settings to take effect..."
 sleep 20
 
@@ -59,7 +59,7 @@ sleep 20
 # — the same module path used locally (uvicorn backend.app.main:app). The deployment zip
 # (below) therefore places the backend/ package directory at the site root.
 echo "Setting the App Service startup command (Gunicorn + UvicornWorker)..."
-az webapp config set --name "${RG}-api" --resource-group "$RG" \
+az webapp config set --name "$APP_SERVICE_NAME" --resource-group "$RG" \
   --startup-file "gunicorn -w 4 -k uvicorn.workers.UvicornWorker backend.app.main:app"
 
 # Bootstrap the PostgreSQL schema with the same script used for production
@@ -100,13 +100,13 @@ zip -r "$OLDPWD/_api.zip" backend runtime.txt \
   -x '*/__pycache__/*' '*/.*' '*/node_modules/*' '*/.pytest_cache/*' '*.egg-info/*' >/dev/null
 zip "$OLDPWD/_api.zip" -j backend/requirements.txt
 cd "$OLDPWD"
-az webapp deploy --name "${RG}-api" --resource-group "$RG" --src-path _api.zip --type zip
+az webapp deploy --name "$APP_SERVICE_NAME" --resource-group "$RG" --src-path _api.zip --type zip
 
 echo "Waiting for API to be ready..."
-API_HOSTNAME="$(az webapp show --name "${RG}-api" --resource-group "$RG" --query defaultHostName -o tsv)"
+API_HOSTNAME="$(az webapp show --name "$APP_SERVICE_NAME" --resource-group "$RG" --query defaultHostName -o tsv)"
 MAX_RETRIES=120
 RETRY=0
-until curl -sf "https://${API_HOSTNAME}/" >/dev/null 2>&1 || [[ $RETRY -ge $MAX_RETRIES ]]; do
+until curl -sf "https://${API_HOSTNAME}/api/health" >/dev/null 2>&1 || [[ $RETRY -ge $MAX_RETRIES ]]; do
   echo "  Attempt $((RETRY+1))/$MAX_RETRIES..."
   sleep 2
   RETRY=$((RETRY+1))
@@ -123,15 +123,15 @@ case "$PHASE" in
   1|3|4|5|6|7|8|9)
     echo "Deploying frontend to Static Web App..."
     ( cd frontend && npm ci && VITE_AUTH_ENABLED=true npm run build )
-    SWA_TOKEN="$(az staticwebapp secrets list --name "${RG}-swa" --resource-group "$RG" --query 'properties.apiKey' -o tsv)"
+    SWA_TOKEN="$(az staticwebapp secrets list --name "$SWA_NAME" --resource-group "$RG" --query 'properties.apiKey' -o tsv)"
     npx --yes @azure/static-web-apps-cli deploy frontend/dist --deployment-token "$SWA_TOKEN" --env production
     echo "Linking App Service backend to Static Web App..."
-    API_HOSTNAME="$(az webapp show --name "${RG}-api" --resource-group "$RG" --query defaultHostName -o tsv)"
+    API_HOSTNAME="$(az webapp show --name "$APP_SERVICE_NAME" --resource-group "$RG" --query defaultHostName -o tsv)"
     az staticwebapp backends link \
-      --name "${RG}-swa" \
+      --name "$SWA_NAME" \
       --resource-group "$RG" \
-      --backend-resource-id "$(az webapp show --name "${RG}-api" --resource-group "$RG" --query id -o tsv)" \
-      --backend-region "$(az webapp show --name "${RG}-api" --resource-group "$RG" --query location -o tsv)"
+      --backend-resource-id "$(az webapp show --name "$APP_SERVICE_NAME" --resource-group "$RG" --query id -o tsv)" \
+      --backend-region "$(az webapp show --name "$APP_SERVICE_NAME" --resource-group "$RG" --query location -o tsv)"
     echo "Linked App Service backend: https://${API_HOSTNAME}";;
 esac
 
@@ -142,6 +142,6 @@ case "$PHASE" in
     ( cd backend/pipeline && func azure functionapp publish "${RG}-pipeline" --python );;
 esac
 
-API_URL="$(az webapp show --name "${RG}-api" --resource-group "$RG" --query defaultHostName -o tsv)"
+API_URL="$(az webapp show --name "$APP_SERVICE_NAME" --resource-group "$RG" --query defaultHostName -o tsv)"
 echo "Deployed phase $PHASE to $TIER tier. API: https://${API_URL}"
 echo "Run integration tests against https://${API_URL} with DB_ENGINE=postgresql, LOCAL_AUTH_BYPASS absent."
