@@ -47,7 +47,9 @@ az webapp config appsettings set --name "$APP_SERVICE_NAME" --resource-group "$R
   ENTRA_TENANT_ID="$ENTRA_TENANT_ID" \
   ENTRA_CLIENT_ID="$ENTRA_CLIENT_ID" \
   KEY_VAULT_NAME="${RG}-kv" \
-  SCM_DO_BUILD_DURING_DEPLOYMENT=true
+  SCM_DO_BUILD_DURING_DEPLOYMENT=true \
+  SCM_COMPRESS_OUTPUT_DIR=false \
+  PROJECT=backend
 echo "Set app settings with Key Vault references (ENTRA_REDIRECT_URI and FRONTEND_BASE_URL from Key Vault)"
 echo "Waiting for app settings to take effect..."
 sleep 20
@@ -55,11 +57,11 @@ sleep 20
 # Startup command (Cloud Migration v2.0 §3.5). App Service cannot guess the module
 # path; without this, Oryx's default gunicorn guess never finds the API and the site
 # serves a default "Not Found" page. Pin Gunicorn + UvicornWorker to backend.app.main:app
-# — the same module path used locally (uvicorn backend.app.main:app). The deployment zip
-# (below) therefore places the backend/ package directory at the site root.
+# — the same module path used locally (uvicorn backend.app.main:app). Add wwwroot to
+# PYTHONPATH so gunicorn can import the backend module from /home/site/wwwroot.
 echo "Setting the App Service startup command (Gunicorn + UvicornWorker)..."
 az webapp config set --name "$APP_SERVICE_NAME" --resource-group "$RG" \
-  --startup-file "gunicorn -w 4 -k uvicorn.workers.UvicornWorker backend.app.main:app"
+  --startup-file "PYTHONPATH=/home/site/wwwroot gunicorn -w 4 -k uvicorn.workers.UvicornWorker backend.app.main:app"
 
 # Bootstrap the PostgreSQL schema with the same script used for production
 # (Cloud Migration v2.0 §5). Requires schema/bootstrap_pg.sql (open item, Cloud
@@ -91,15 +93,25 @@ fi
 # `from backend.app...` imports), plus requirements.txt and runtime.txt at the root
 # for Oryx to detect Python and install runtime deps. Stage all in a temp dir, then
 # zip from there. Exclude node_modules, __pycache__, .git, and other build artifacts
-# to minimize upload size and deployment time.
+# to minimize upload size and deployment time. Disable Oryx's output compression
+# (SCM_COMPRESS_OUTPUT_DIR=false in app settings) so the backend module is available
+# in wwwroot at runtime, not compressed in .tar.zst.
 echo "Deploying API code to Web App..."
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
-zip -r "$OLDPWD/_api.zip" backend runtime.txt \
-  -x '*/__pycache__/*' '*/.*' '*/node_modules/*' '*/.pytest_cache/*' '*.egg-info/*' >/dev/null
-zip "$OLDPWD/_api.zip" -j backend/requirements.txt
+zip -r "$OLDPWD/_api.zip" backend requirements.txt runtime.txt \
+  -x '*venv/*' '*.venv/*' '*__pycache__*'  >/dev/null
 cd "$OLDPWD"
 az webapp deploy --name "$APP_SERVICE_NAME" --resource-group "$RG" --src-path _api.zip --type zip
+
+# # After Oryx builds, manually copy backend to wwwroot if it's not there
+# az webapp ssh --name "$APP_SERVICE_NAME" --resource-group "$RG" << 'EOF'
+# if [ ! -d /home/site/wwwroot/backend ]; then
+#   echo "Copying backend directory to wwwroot..."
+#   find /tmp/zipdeploy -name backend -type d 2>/dev/null | head -1 | xargs -I {} cp -r {} /home/site/wwwroot/
+# fi
+# exit
+# EOF
 
 echo "Waiting for API to be ready..."
 API_HOSTNAME="$(az webapp show --name "$APP_SERVICE_NAME" --resource-group "$RG" --query defaultHostName -o tsv)"

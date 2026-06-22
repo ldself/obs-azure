@@ -77,9 +77,9 @@ az appservice plan create --name "${RG}-asp" --resource-group "$RG" \
 echo "Provisioning Web App..."
 az webapp create --name "$APP_SERVICE_NAME" --resource-group "$RG" \
   --plan "${RG}-asp" --runtime PYTHON:3.11
-echo "Disabling App Service platform-level authentication (letting FastAPI handle auth)..."
-az webapp auth-classic update --name "$APP_SERVICE_NAME" --resource-group "$RG" \
-  --enabled false
+# echo "Disabling App Service platform-level authentication (letting FastAPI handle auth)..."
+# az webapp auth-classic update --name "$APP_SERVICE_NAME" --resource-group "$RG" \
+#   --enabled false
 echo "Assigning managed identity and granting Key Vault secret access (§4.2)..."
 APP_PRINCIPAL_ID="$(az webapp identity assign --name "$APP_SERVICE_NAME" --resource-group "$RG" \
   --query principalId -o tsv)"
