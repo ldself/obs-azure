@@ -13,12 +13,20 @@ authentication and deploys to Azure on PostgreSQL with Microsoft Entra ID SSO.
 
 ## Status
 
-Phase 0 (infrastructure & platform foundations) is in place: the hosting-agnostic FastAPI
-stub with a `/health` endpoint, the DuckDB/PostgreSQL engine switch, schema bootstrap, the
-`RULE 8` `LOCAL_AUTH_BYPASS` safety check, pipeline and Azure Functions scaffolding, the
-Makefile, and the per-phase local + cloud validation harness. The business routers,
-authorization flow, calculation service, and frontend screens are built out phase by phase
-per the [Build Sequencing Plan](docs/OBS_Build_Sequencing_Plan_v1_2.docx) (10 phases).
+**Phase 1 (Authentication, User Registry & Security Core) is complete.**
+
+- Phase 0 foundations are in place: hosting-agnostic FastAPI stub, DuckDB/PostgreSQL engine
+  switch, schema bootstrap, `LOCAL_AUTH_BYPASS` safety check (RULE 8), pipeline and Azure
+  Functions scaffolding, Makefile, and per-phase local + cloud validation harness.
+- Phase 1 delivers: Microsoft Entra ID OIDC authentication middleware, the full 7-step
+  authorization flow on every endpoint, `obs.users` user registry with `is_active` /
+  `is_administrator` / capability flags, `/api/auth/*` and `/api/users/*` routers, the
+  React login flow with `AuthContext`, an admin user-management page, and cloud validation
+  confirmed against Azure App Service + Static Web Apps.
+
+The business routers, calculation service, and remaining frontend screens are built out
+phase by phase per the [Build Sequencing Plan](docs/OBS_Build_Sequencing_Plan_v1_2.docx)
+(10 phases total).
 
 ---
 
@@ -50,7 +58,8 @@ infra/             Azure CLI provision / deploy / teardown scripts (*-example te
 phase_validation/  Per-phase local + cloud validation scripts (e.g. 00_foundations/)
 docs/              Authoritative specifications (versioned .docx)
 local-data/        GIT-IGNORED: landing-zone/, archive/, error/, obs.duckdb
-.claude/agents/    Claude Code subagents (spec-librarian, phase-gate-checker, azure-lifecycle-operator)
+.claude/agents/    Claude Code subagents (spec-librarian, phase-gate-checker, azure-lifecycle-operator,
+                   terminology-guard, auth-flow-reviewer, frontend-conventions-reviewer)
 Makefile           Local dev convenience commands (make help)
 CLAUDE.md          Repo-root orientation, read first
 ```
