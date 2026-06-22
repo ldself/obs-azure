@@ -32,6 +32,7 @@ from fastapi.responses import RedirectResponse
 from backend.app.auth.token import InvalidTokenError
 from backend.app.auth.token import validate_access_token
 from backend.app.config import settings
+from backend.app.db import engine
 from backend.app.db import helpers
 from backend.app.services import audit_service
 
@@ -105,21 +106,44 @@ def callback(code: str | None = None) -> RedirectResponse:  # pragma: no cover -
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token exchange failed.")
     tokens = token_response.json()
 
-    # Resolve the user and record the login event (AC-AUDIT-04).
+    # Step 1 — validate token / resolve identity.
     oid = ""
     try:
         oid = validate_access_token(tokens["access_token"]).get("oid", "")
     except (InvalidTokenError, KeyError):
         oid = ""
-    if oid:
+    if not oid:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token has no oid claim.")
+
+    # Step 2 — resolve user in obs.users; enforce is_active (AC-AUDIT-04).
+    ph = engine.placeholder()
+    row = helpers.fetch_one(
+        f"SELECT is_active FROM obs.users WHERE user_id = {ph}",
+        (oid,),
+    )
+    if row is None or not bool(row[0]):
         with helpers.transaction() as conn:
             audit_service.write_audit_event(
                 conn,
-                event_type=audit_service.AuditEvent.USER_LOGIN,
+                event_type=audit_service.AuditEvent.USER_LOGIN_DENIED,
                 user_id=oid,
                 entity_type="user",
                 entity_id=oid,
             )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User is not authorized to access OBS.",
+        )
+
+    # Step 7 — record the login event.
+    with helpers.transaction() as conn:
+        audit_service.write_audit_event(
+            conn,
+            event_type=audit_service.AuditEvent.USER_LOGIN,
+            user_id=oid,
+            entity_type="user",
+            entity_id=oid,
+        )
 
     redirect = RedirectResponse(url=settings.frontend_base_url)
     _set_refresh_cookie(redirect, tokens.get("refresh_token", ""))
@@ -152,6 +176,26 @@ def refresh(request: Request, response: Response) -> dict[str, object]:
     if token_response.status_code != 200:  # pragma: no cover - cloud-only
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh failed.")
     tokens = token_response.json()  # pragma: no cover - cloud-only
+
+    # Step 2 — re-check is_active so a deactivated user cannot keep refreshing.
+    oid = ""  # pragma: no cover - cloud-only
+    try:  # pragma: no cover - cloud-only
+        oid = validate_access_token(tokens["access_token"]).get("oid", "")  # pragma: no cover
+    except (InvalidTokenError, KeyError):  # pragma: no cover
+        oid = ""  # pragma: no cover
+    if oid:  # pragma: no cover - cloud-only
+        ph = engine.placeholder()  # pragma: no cover
+        row = helpers.fetch_one(  # pragma: no cover
+            f"SELECT is_active FROM obs.users WHERE user_id = {ph}",
+            (oid,),
+        )
+        if row is None or not bool(row[0]):  # pragma: no cover
+            _clear_refresh_cookie(response)  # pragma: no cover
+            raise HTTPException(  # pragma: no cover
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="User is not authorized to access OBS.",
+            )
+
     _set_refresh_cookie(response, tokens.get("refresh_token", refresh_token))  # pragma: no cover
     return {  # pragma: no cover - cloud-only
         "access_token": tokens.get("access_token", ""),
@@ -162,25 +206,42 @@ def refresh(request: Request, response: Response) -> dict[str, object]:
 @router.post("/logout")
 def logout(request: Request, response: Response) -> dict[str, str]:
     """Revoke the session: clear the refresh cookie and audit USER_LOGOUT (§6)."""
-    oid = ""
+    # Step 1 — validate token / resolve identity.
     if settings.local_auth_bypass:
         oid = settings.local_auth_user_id
     else:  # pragma: no cover - cloud-only
         token = request.headers.get("authorization", "").partition(" ")[2]
+        if not token:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token.")
         try:
-            oid = validate_access_token(token).get("oid", "")
-        except InvalidTokenError:
-            oid = ""
+            claims = validate_access_token(token)
+            oid = claims.get("oid", "")
+        except InvalidTokenError as exc:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+        if not oid:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token has no oid claim.")
 
-    if oid:
-        with helpers.transaction() as conn:
-            audit_service.write_audit_event(
-                conn,
-                event_type=audit_service.AuditEvent.USER_LOGOUT,
-                user_id=oid,
-                entity_type="user",
-                entity_id=oid,
-            )
+    # Step 2 — resolve user in obs.users; enforce is_active.
+    ph = engine.placeholder()
+    row = helpers.fetch_one(
+        f"SELECT is_active FROM obs.users WHERE user_id = {ph}",
+        (oid,),
+    )
+    if row is None or not bool(row[0]):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User is not authorized to access OBS.",
+        )
+
+    # Step 7 — write USER_LOGOUT audit (atomic with no data mutation needed).
+    with helpers.transaction() as conn:
+        audit_service.write_audit_event(
+            conn,
+            event_type=audit_service.AuditEvent.USER_LOGOUT,
+            user_id=oid,
+            entity_type="user",
+            entity_id=oid,
+        )
 
     _clear_refresh_cookie(response)
     logout_url = settings.frontend_base_url if settings.local_auth_bypass else settings.entra_logout_url

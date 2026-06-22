@@ -13,6 +13,7 @@ import pytest
 from backend.app.auth import token as token_module
 from backend.app.auth.token import InvalidTokenError
 from backend.app.auth.token import validate_access_token
+from backend.app.config import settings
 
 
 class _FakeKey:
@@ -30,6 +31,7 @@ def _reset_jwks(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(token_module, "_jwks_client", None)
     monkeypatch.setattr(token_module, "_jwks_built_at", 0.0)
     monkeypatch.setattr(token_module, "PyJWKClient", lambda _uri: _FakeJwksClient())
+    monkeypatch.setattr(settings, "entra_tenant_id", "test-tenant-id")
 
 
 def test_empty_token_raises() -> None:
@@ -38,7 +40,7 @@ def test_empty_token_raises() -> None:
 
 
 def test_valid_token_returns_claims(monkeypatch: pytest.MonkeyPatch) -> None:
-    claims = {"oid": "abc-123", "email": "u@example.com", "name": "User"}
+    claims = {"oid": "abc-123", "email": "u@example.com", "name": "User", "iss": "https://sts.windows.net/test-tenant-id/"}
     monkeypatch.setattr(jwt, "decode", lambda *a, **k: claims)
     result = validate_access_token("header.payload.sig")
     assert result["oid"] == "abc-123"
@@ -63,7 +65,7 @@ def test_expired_token_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_jwks_client_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(jwt, "decode", lambda *a, **k: {"oid": "x"})
+    monkeypatch.setattr(jwt, "decode", lambda *a, **k: {"oid": "x", "iss": "https://sts.windows.net/test-tenant-id/"})
     validate_access_token("a.b.c")
     first = token_module._jwks_client
     validate_access_token("a.b.c")
