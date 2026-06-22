@@ -1,9 +1,10 @@
 """OBS FastAPI application entry point.
 
-Phase 0 scope: a hosting-agnostic stub API that exposes a health endpoint
-returning HTTP 200 (Build Sequencing Plan v1.2 §4.0.4) and wires the
-DuckDB/PostgreSQL engine switch. Authentication middleware, the 7-step
-authorization flow, and all business routers are introduced in later phases.
+Phase 1 scope: the security core. On top of the Phase 0 health stub and engine
+switch, this wires the user-registry / grant routers and the BFF OIDC auth
+routes. Every business endpoint enforces the §9.1 seven-step authorization flow
+via the dependencies in ``backend.app.auth``; ``/api/health`` remains the only
+unauthenticated endpoint (Build Sequencing Plan v1.2 §4.1.3).
 """
 
 # `from __future__ import annotations` makes Python treat every type hint in this
@@ -25,6 +26,8 @@ from fastapi.middleware.cors import CORSMiddleware  # lets the browser frontend 
 from backend.app.config import assert_local_auth_bypass_safe  # the RULE 8 safety check
 from backend.app.config import settings  # all configuration values, read from env vars at startup
 from backend.app.db import engine  # the DuckDB-vs-PostgreSQL database switch
+from backend.app.routers import auth_routes  # BFF OIDC endpoints (/api/v1/auth/*)
+from backend.app.routers import users  # user registry + grant endpoints (§4.1.3)
 
 
 # Configure logging ONCE for the whole app. `settings.log_level` is a string like
@@ -70,7 +73,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 # FastAPI knows to run our startup logic.
 app = FastAPI(
     title="OPEX Budgeting System API",
-    version="0.0.0",  # Phase 0 stub
+    version="0.1.0",  # Phase 1 — Authentication, User Registry & Security Core
     description="OBS stateless REST API. All business logic is server-side.",
     lifespan=lifespan,
 )
@@ -89,16 +92,24 @@ app.add_middleware(
 )
 
 
-# Define an HTTP endpoint. The decorator `@app.get("/health")` registers this function
-# to handle GET requests to the URL path "/health". `tags=["platform"]` just groups it
+# Define an HTTP endpoint. The decorator `@app.get("/api/health")` registers this function
+# to handle GET requests to the URL path "/api/health". `tags=["platform"]` just groups it
 # under "platform" in the /docs page. Whatever the function returns becomes the JSON
 # response body. This is the only endpoint in Phase 0.
-@app.get("/health", tags=["platform"])
+@app.get("/api/health", tags=["platform"])
 def health() -> dict[str, str]:
     """Liveness probe for load balancers and monitoring.
 
     Returns HTTP 200 with the active engine. Intentionally does not depend on a
     database connection so the probe stays stable before the schema is
-    bootstrapped (Build Sequencing Plan v1.2 §4.0.4).
+    bootstrapped. This is the only unauthenticated endpoint.
     """
     return {"status": "ok", "engine": engine.engine_name()}
+
+
+# Phase 1 routers. The BFF auth routes own the OIDC code exchange and the
+# httpOnly refresh cookie (Security Spec v1.4 §6); the users router exposes the
+# §4.1.3 registry + grant endpoints. Every route except /api/health enforces the
+# §9.1 authorization flow via backend.app.auth dependencies.
+app.include_router(auth_routes.router)
+app.include_router(users.router)

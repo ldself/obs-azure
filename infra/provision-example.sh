@@ -27,7 +27,12 @@ else
   BLOB_SKU=$PROD_BLOB_SKU; SWA_SKU=$PROD_SWA_SKU; KV_RET=$PROD_KV_RETENTION
 fi
 
+APP_SERVICE_NAME="${RG}-api"
+SWA_NAME="${RG}-swa"
+
 echo "Provisioning $TIER tier for phase $PHASE into $RG..."
+echo "  App Service: $APP_SERVICE_NAME"
+echo "  Static Web App: $SWA_NAME"
 az account set --subscription "$SUBSCRIPTION_ID"
 az group create --name "$RG" --location "$AZURE_REGION"
 
@@ -70,10 +75,13 @@ echo "Provisioning App Service plan (${APP_SKU} SKU, ${APP_WORKERS} workers)..."
 az appservice plan create --name "${RG}-asp" --resource-group "$RG" \
   --sku "$APP_SKU" --is-linux --number-of-workers "$APP_WORKERS"
 echo "Provisioning Web App..."
-az webapp create --name "${RG}-api" --resource-group "$RG" \
+az webapp create --name "$APP_SERVICE_NAME" --resource-group "$RG" \
   --plan "${RG}-asp" --runtime PYTHON:3.11
+# echo "Disabling App Service platform-level authentication (letting FastAPI handle auth)..."
+# az webapp auth-classic update --name "$APP_SERVICE_NAME" --resource-group "$RG" \
+#   --enabled false
 echo "Assigning managed identity and granting Key Vault secret access (§4.2)..."
-APP_PRINCIPAL_ID="$(az webapp identity assign --name "${RG}-api" --resource-group "$RG" \
+APP_PRINCIPAL_ID="$(az webapp identity assign --name "$APP_SERVICE_NAME" --resource-group "$RG" \
   --query principalId -o tsv)"
 az keyvault set-policy --name "${RG}-kv" --object-id "$APP_PRINCIPAL_ID" \
   --secret-permissions get list --output none
@@ -81,10 +89,17 @@ echo "Creating Application Insights component..."
 az monitor app-insights component create --app "${RG}-ai" --location "$AZURE_REGION" \
   --resource-group "$RG" --application-type web
 
+echo "Storing secrets in Key Vault (Cloud Migration v2.0 §10)..."
+# ENTRA_CLIENT_SECRET is stored as a secret so deploy.sh and future operations
+# read it from Key Vault, not regenerate it. ENTRA_REDIRECT_URI and FRONTEND_BASE_URL
+# are derived from the SWA hostname after creation (below).
+az keyvault secret set --vault-name "${RG}-kv" --name obs-entra-client-secret \
+  --value "${ENTRA_CLIENT_SECRET}" --output none
+
 # PostgreSQL firewall: allow the App Service outbound IPs (Cloud Migration v2.0 §4.5).
 # outboundIpAddresses is a comma-separated list; each gets its own single-IP rule.
 echo "Configuring PostgreSQL firewall for App Service outbound IPs (§4.5)..."
-APP_OUTBOUND_IPS="$(az webapp show --name "${RG}-api" --resource-group "$RG" \
+APP_OUTBOUND_IPS="$(az webapp show --name "$APP_SERVICE_NAME" --resource-group "$RG" \
   --query outboundIpAddresses -o tsv)"
 IFS=',' read -ra _app_ips <<< "$APP_OUTBOUND_IPS"
 rule_n=0
@@ -98,10 +113,22 @@ done
 # Phase-gated resources per the §4 resource matrix of the Cloud Validation Strategy.
 # Static Web Apps: all UI-bearing phases.
 case "$PHASE" in
-  0|3|4|5|6|7|8|9)
+  0|1|2|3|4|5|6|7|8|9)
     echo "Provisioning Static Web App (${SWA_SKU} SKU)..."
-    az staticwebapp create --name "${RG}-swa" --resource-group "$RG" \
-      --sku "$SWA_SKU" --location "$AZURE_REGION";;
+    az staticwebapp create --name "$SWA_NAME" --resource-group "$RG" \
+      --sku "$SWA_SKU" --location "$AZURE_REGION"
+    SWA_URL=$(az staticwebapp show --name "$SWA_NAME" --resource-group "$RG" \
+      --query defaultHostname --output tsv)
+    # Derive FRONTEND_BASE_URL and ENTRA_REDIRECT_URI from the SWA hostname
+    FRONTEND_BASE_URL="https://${SWA_URL}"
+    ENTRA_REDIRECT_URI="https://${SWA_URL}/api/v1/auth/callback"
+    echo "Storing derived URLs in Key Vault..."
+    az keyvault secret set --vault-name "${RG}-kv" --name obs-frontend-base-url \
+      --value "${FRONTEND_BASE_URL}" --output none
+    az keyvault secret set --vault-name "${RG}-kv" --name obs-entra-redirect-uri \
+      --value "${ENTRA_REDIRECT_URI}" --output none
+    echo "  FRONTEND_BASE_URL: ${FRONTEND_BASE_URL}"
+    echo "  ENTRA_REDIRECT_URI: ${ENTRA_REDIRECT_URI}";;
 esac
 # Blob landing zone + containers: phases that touch ingestion.
 case "$PHASE" in

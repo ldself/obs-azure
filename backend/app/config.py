@@ -41,6 +41,47 @@ class Settings(BaseSettings):
     local_auth_user_email: str = Field(default="")
     local_auth_user_name: str = Field(default="")
 
+    # --- Microsoft Entra ID (OIDC/OAuth 2.0) ---
+    # These are unused on the local LOCAL_AUTH_BYPASS path and are resolved from
+    # App Service configuration / Key Vault in Azure. The backend acts as the
+    # OIDC confidential client (BFF pattern): it performs the authorization-code
+    # exchange and owns the httpOnly refresh cookie (Security Spec v1.4 §6).
+    entra_tenant_id: str = Field(default="")
+    entra_client_id: str = Field(default="")  # API audience and OIDC client id
+    entra_client_secret: str = Field(default="")
+    entra_redirect_uri: str = Field(default="")  # backend /api/v1/auth/callback URL
+    # Where the backend redirects the browser after a successful login/logout.
+    frontend_base_url: str = Field(default="http://localhost:5173")
+    # httpOnly refresh-token cookie (Security Spec v1.4 §6). Secure flag is forced
+    # on outside localhost; it is relaxed locally so http://localhost works.
+    refresh_cookie_name: str = Field(default="obs_refresh_token")
+    refresh_cookie_secure: bool = Field(default=True)
+
+    @property
+    def entra_issuer(self) -> str:
+        """Expected ``iss`` claim for tokens from the configured tenant (v2.0)."""
+        return f"https://login.microsoftonline.com/{self.entra_tenant_id}/v2.0"
+
+    @property
+    def entra_jwks_uri(self) -> str:
+        """JWKS endpoint used to validate Entra ID access-token signatures."""
+        return f"https://login.microsoftonline.com/{self.entra_tenant_id}/discovery/v2.0/keys"
+
+    @property
+    def entra_authorize_url(self) -> str:
+        """OAuth 2.0 authorization endpoint for the configured tenant."""
+        return f"https://login.microsoftonline.com/{self.entra_tenant_id}/oauth2/v2.0/authorize"
+
+    @property
+    def entra_token_url(self) -> str:
+        """OAuth 2.0 token endpoint for the configured tenant."""
+        return f"https://login.microsoftonline.com/{self.entra_tenant_id}/oauth2/v2.0/token"
+
+    @property
+    def entra_logout_url(self) -> str:
+        """End-session endpoint; the SPA is redirected here on logout (§6)."""
+        return f"https://login.microsoftonline.com/{self.entra_tenant_id}/oauth2/v2.0/logout"
+
     # --- Filesystem landing zone (substitutes for Azure Blob Storage locally) ---
     landing_zone_path: str = Field(default="./local-data/landing-zone")
     archive_path: str = Field(default="./local-data/archive")

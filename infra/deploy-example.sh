@@ -16,31 +16,50 @@ while [[ $# -gt 0 ]]; do case "$1" in
 
 if [[ "$TIER" == "validation" ]]; then RG="obs-val-${PHASE}-rg"; else RG="obs-prod-rg"; fi
 
+APP_SERVICE_NAME="${RG}-api"
+SWA_NAME="${RG}-swa"
+
 az account set --subscription "$SUBSCRIPTION_ID"
+
+# Store secrets in Key Vault (Cloud Migration v2.0 §10: secrets via Key Vault managed identity).
+# The deploy script reads secrets from the environment (tier.env) and stores them in Key Vault.
+# The app then references them via Key Vault URIs, so the secrets never appear in app settings.
+echo "Storing secrets in Key Vault..."
+KV_URI="$(az keyvault show --name "${RG}-kv" --resource-group "$RG" --query properties.vaultUri -o tsv)"
+if [[ -n "$ENTRA_CLIENT_SECRET" ]]; then
+  az keyvault secret set --vault-name "${RG}-kv" --name obs-entra-client-secret --value "$ENTRA_CLIENT_SECRET" >/dev/null
+fi
 
 # App settings: enforce the production configuration contract. Note LOCAL_AUTH_BYPASS is
 # deliberately NOT set — the startup assertion (RULE 8) must see it absent off localhost.
-# PG_CONNECTION_STRING is injected as a Key Vault reference (Cloud Migration v2.0 §10):
-# App Service resolves it at runtime via the managed identity granted in provision.sh
-# (§4.2). The secret value never appears in app settings, the portal, or code.
-echo "Configuring API app settings with Key Vault reference to the PostgreSQL connection string secret..."
-KV_URI="$(az keyvault show --name "${RG}-kv" --resource-group "$RG" --query properties.vaultUri -o tsv)"
-az webapp config appsettings set --name "${RG}-api" --resource-group "$RG" --settings \
+# All configuration is injected as Key Vault references (Cloud Migration v2.0 §10): App
+# Service resolves them at runtime via the managed identity granted in provision.sh (§4.2).
+# The secret values and URLs never appear in app settings, the portal, or code.
+# ENTRA_REDIRECT_URI and FRONTEND_BASE_URL are read from Key Vault, not regenerated.
+echo "Configuring API app settings with Key Vault references..."
+az webapp config appsettings set --name "$APP_SERVICE_NAME" --resource-group "$RG" --settings \
   DB_ENGINE=postgresql \
-  "PG_CONNECTION_STRING=@Microsoft.KeyVault(SecretUri=${KV_URI}secrets/obs-pg-connection-string/)" \
+  "POSTGRESQL_DSN=@Microsoft.KeyVault(SecretUri=${KV_URI}secrets/obs-pg-connection-string/)" \
+  "ENTRA_CLIENT_SECRET=@Microsoft.KeyVault(SecretUri=${KV_URI}secrets/obs-entra-client-secret/)" \
+  "ENTRA_REDIRECT_URI=@Microsoft.KeyVault(SecretUri=${KV_URI}secrets/obs-entra-redirect-uri/)" \
+  "FRONTEND_BASE_URL=@Microsoft.KeyVault(SecretUri=${KV_URI}secrets/obs-frontend-base-url/)" \
+  "CORS_ALLOWED_ORIGINS=@Microsoft.KeyVault(SecretUri=${KV_URI}secrets/obs-frontend-base-url/)" \
   ENTRA_TENANT_ID="$ENTRA_TENANT_ID" \
   ENTRA_CLIENT_ID="$ENTRA_CLIENT_ID" \
   KEY_VAULT_NAME="${RG}-kv" \
-  SCM_DO_BUILD_DURING_DEPLOYMENT=true
+  SCM_DO_BUILD_DURING_DEPLOYMENT=false
+echo "Set app settings with Key Vault references (ENTRA_REDIRECT_URI and FRONTEND_BASE_URL from Key Vault)"
+echo "Waiting for app settings to take effect..."
+sleep 30
 
-# Startup command (Cloud Migration v2.0 §3.5). App Service cannot guess the module
-# path; without this, Oryx's default gunicorn guess never finds the API and the site
-# serves a default "Not Found" page. Pin Gunicorn + UvicornWorker to backend.app.main:app
-# — the same module path used locally (uvicorn backend.app.main:app). The deployment zip
-# (below) therefore places the backend/ package directory at the site root.
+# Startup command (Cloud Migration v2.0 §3.5). App Service uses the system Python/gunicorn
+# (not Oryx-built). PYTHONPATH must include both wwwroot (so backend.app.main is importable)
+# and .python_packages/lib/site-packages (so the system gunicorn finds uvicorn and all other
+# vendored deps). Without the second path, gunicorn starts but fails with
+# "No module named 'uvicorn'" because uvicorn is only in the vendored package directory.
 echo "Setting the App Service startup command (Gunicorn + UvicornWorker)..."
-az webapp config set --name "${RG}-api" --resource-group "$RG" \
-  --startup-file "gunicorn -w 4 -k uvicorn.workers.UvicornWorker backend.app.main:app"
+az webapp config set --name "$APP_SERVICE_NAME" --resource-group "$RG" \
+  --startup-file "PYTHONPATH=/home/site/wwwroot:/home/site/wwwroot/.python_packages/lib/site-packages gunicorn -w 4 -k uvicorn.workers.UvicornWorker backend.app.main:app"
 
 # Bootstrap the PostgreSQL schema with the same script used for production
 # (Cloud Migration v2.0 §5). Requires schema/bootstrap_pg.sql (open item, Cloud
@@ -67,26 +86,66 @@ else
   echo "WARNING: schema/bootstrap_pg.sql not found — schema not applied." >&2
 fi
 
-# Deploy the API code. The site root must contain the backend/ package DIRECTORY
-# (the startup command imports backend.app.main:app and main.py uses absolute
-# `from backend.app...` imports), plus a requirements.txt at the root for Oryx to
-# install runtime deps. Stage both in a temp dir, then zip from there.
+# Deploy the API code. Pre-install all Python dependencies locally to avoid the Oryx
+# build step on App Service. The site root contains: backend/ package DIRECTORY (startup
+# command imports backend.app.main:app), requirements.txt, runtime.txt, and .python_packages/
+# (pre-built wheels, platform: linux x86_64). Exclude node_modules, __pycache__, .git,
+# and other artifacts to minimize upload size. App Service automatically prepends
+# .python_packages/lib/site-packages to sys.path when SCM_DO_BUILD_DURING_DEPLOYMENT=false.
+echo "Pre-installing Python dependencies..."
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_ROOT"
+pip install -r requirements.txt \
+  --target=".python_packages/lib/site-packages/" \
+  --python-version 3.11 \
+  --only-binary=:all: \
+  --platform manylinux2014_x86_64 \
+  -q
 echo "Deploying API code to Web App..."
-STAGE="$(mktemp -d)"
-cp -R backend "$STAGE/backend"
-cp backend/requirements.txt "$STAGE/requirements.txt"
-( cd "$STAGE" && zip -r "$OLDPWD/_api.zip" . -x '*/__pycache__/*' >/dev/null )
-rm -rf "$STAGE"
-az webapp deploy --name "${RG}-api" --resource-group "$RG" --src-path _api.zip --type zip
+zip -r "$OLDPWD/_api.zip" backend requirements.txt runtime.txt .python_packages \
+  -x '*venv/*' '*.venv/*' '*__pycache__*' '*/.pyc'  >/dev/null
+rm -rf .python_packages
+cd "$OLDPWD"
+az webapp deploy --name "$APP_SERVICE_NAME" \
+  --resource-group "$RG" --src-path _api.zip --type zip \
+  --clean true --restart true
+
+# Wait for the API to be ready before proceeding.
+# The deployment can complete before the app is fully up, so poll
+# the /api/health endpoint until it responds (or timeout after ~4 minutes).
+# This ensures the API is ready to serve requests before we deploy the
+#frontend or pipeline, which depend on it.
+echo "Waiting for API to be ready..."
+API_HOSTNAME="$(az webapp show --name "$APP_SERVICE_NAME" --resource-group "$RG" --query defaultHostName -o tsv)"
+MAX_RETRIES=120
+RETRY=0
+until curl -sf "https://${API_HOSTNAME}/api/health" >/dev/null 2>&1 || [[ $RETRY -ge $MAX_RETRIES ]]; do
+  echo "  Attempt $((RETRY+1))/$MAX_RETRIES..."
+  sleep 2
+  RETRY=$((RETRY+1))
+done
+if [[ $RETRY -ge $MAX_RETRIES ]]; then
+  echo "WARNING: API did not respond after ${MAX_RETRIES} retries (continuing anyway)" >&2
+else
+  echo "API is responding."
+fi
 rm -f _api.zip
 
 # Deploy the frontend to Static Web Apps where the phase has a UI surface.
 case "$PHASE" in
-  3|4|5|6|7|8|9)
+  0|1|3|4|5|6|7|8|9)
     echo "Deploying frontend to Static Web App..."
-    ( cd frontend && npm ci && npm run build )
-    SWA_TOKEN="$(az staticwebapp secrets list --name "${RG}-swa" --resource-group "$RG" --query 'properties.apiKey' -o tsv)"
-    npx --yes @azure/static-web-apps-cli deploy frontend/dist --deployment-token "$SWA_TOKEN" --env production;;
+    ( cd frontend && npm ci && VITE_AUTH_ENABLED=true npm run build )
+    SWA_TOKEN="$(az staticwebapp secrets list --name "$SWA_NAME" --resource-group "$RG" --query 'properties.apiKey' -o tsv)"
+    npx --yes @azure/static-web-apps-cli deploy frontend/dist --deployment-token "$SWA_TOKEN" --env production
+    echo "Linking App Service backend to Static Web App..."
+    API_HOSTNAME="$(az webapp show --name "$APP_SERVICE_NAME" --resource-group "$RG" --query defaultHostName -o tsv)"
+    az staticwebapp backends link \
+      --name "$SWA_NAME" \
+      --resource-group "$RG" \
+      --backend-resource-id "$(az webapp show --name "$APP_SERVICE_NAME" --resource-group "$RG" --query id -o tsv)" \
+      --backend-region "$(az webapp show --name "$APP_SERVICE_NAME" --resource-group "$RG" --query location -o tsv)"
+    echo "Linked App Service backend: https://${API_HOSTNAME}";;
 esac
 
 # Deploy the Functions pipeline where the phase requires it.
@@ -96,6 +155,6 @@ case "$PHASE" in
     ( cd backend/pipeline && func azure functionapp publish "${RG}-pipeline" --python );;
 esac
 
-API_URL="$(az webapp show --name "${RG}-api" --resource-group "$RG" --query defaultHostName -o tsv)"
+API_URL="$(az webapp show --name "$APP_SERVICE_NAME" --resource-group "$RG" --query defaultHostName -o tsv)"
 echo "Deployed phase $PHASE to $TIER tier. API: https://${API_URL}"
 echo "Run integration tests against https://${API_URL} with DB_ENGINE=postgresql, LOCAL_AUTH_BYPASS absent."
