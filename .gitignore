@@ -129,6 +129,9 @@ frontend/node_modules/
 # OBS local data (DuckDB file + landing-zone/archive/error substitutes for Blob Storage)
 local-data/
 
+# Python vendored packages (pre-built for Oryx-free deployment)
+.python_packages/
+
 # Azure Functions local settings (secrets)
 pipeline-functions/local.settings.json
 
