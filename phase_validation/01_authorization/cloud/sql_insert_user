@@ -1,0 +1,29 @@
+INSERT INTO obs.users (
+    user_id,
+    display_name,
+    email,
+    is_active,
+    is_administrator,
+    is_system_modeler,
+    is_report_developer,
+    is_finance_reviewer,
+    created_at,
+    created_by
+)
+VALUES (
+    '',
+    'Leslie Self',
+    'lself537@gmail.com',
+    TRUE,
+    TRUE,
+    FALSE,
+    FALSE,
+    FALSE,
+    NOW(),
+    'bootstrap'
+)
+ON CONFLICT (user_id) DO UPDATE
+    SET is_active        = TRUE,
+        is_administrator = TRUE,
+        updated_at       = NOW(),
+        updated_by       = 'bootstrap';
