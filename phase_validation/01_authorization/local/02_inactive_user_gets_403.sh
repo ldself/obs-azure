@@ -12,7 +12,8 @@ set -uo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../" && pwd)"
 VENV_DIR="/tmp/obs_validation_venv"
 DB_PATH="/tmp/obs_test_validation.duckdb"
-API_URL="http://localhost:8000"
+TEST_PORT=8765
+API_URL="http://localhost:$TEST_PORT"
 API_PID=""
 
 # Colors
@@ -86,7 +87,8 @@ PYSCRIPT
 start_api_server() {
     local user_id=$1
 
-    export PYTHONPATH="$VENV_DIR/lib/python3.11/site-packages:$PROJECT_ROOT"
+    PYTHON_VER=$("$VENV_DIR/bin/python3" -c "import sys; v=sys.version_info; print(f'python{v.major}.{v.minor}')")
+    export PYTHONPATH="$VENV_DIR/lib/$PYTHON_VER/site-packages:$PROJECT_ROOT"
     export LOCAL_AUTH_BYPASS="true"
     export LOCAL_AUTH_USER_ID="$user_id"
     export LOCAL_AUTH_USER_EMAIL="$user_id@obs.local"
@@ -98,15 +100,20 @@ start_api_server() {
     # Start API server in background
     "$VENV_DIR/bin/python3" -m uvicorn backend.app.main:app \
         --host localhost \
-        --port 8000 \
+        --port "$TEST_PORT" \
         --log-level error \
         > /tmp/obs_api_test.log 2>&1 &
     API_PID=$!
 
-    # Wait for server to be ready
+    # Wait for server to be ready, checking the process is still alive each iteration
     local max_retries=30
     local retry=0
     while [ $retry -lt $max_retries ]; do
+        if ! kill -0 "$API_PID" 2>/dev/null; then
+            echo "API server process exited unexpectedly" >&2
+            cat /tmp/obs_api_test.log >&2
+            return 1
+        fi
         if curl -s "$API_URL/api/v1/me" >/dev/null 2>&1; then
             return 0
         fi

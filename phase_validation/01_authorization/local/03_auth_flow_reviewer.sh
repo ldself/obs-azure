@@ -103,3 +103,8 @@ echo "  3. Run this script again to confirm no new routers added"
 echo "=============================================="
 
 exit 0
+
+# To mark this validation as resolved:
+# Run auth-flow-reviewer over the new endpoints in
+# backend/app/routers/auth_routes.py
+# and backend/app/routers/users.py
