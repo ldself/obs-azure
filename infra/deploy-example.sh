@@ -50,16 +50,16 @@ az webapp config appsettings set --name "$APP_SERVICE_NAME" --resource-group "$R
   SCM_DO_BUILD_DURING_DEPLOYMENT=false
 echo "Set app settings with Key Vault references (ENTRA_REDIRECT_URI and FRONTEND_BASE_URL from Key Vault)"
 echo "Waiting for app settings to take effect..."
-sleep 20
+sleep 30
 
-# Startup command (Cloud Migration v2.0 §3.5). App Service cannot guess the module
-# path; without this, Oryx's default gunicorn guess never finds the API and the site
-# serves a default "Not Found" page. Pin Gunicorn + UvicornWorker to backend.app.main:app
-# — the same module path used locally (uvicorn backend.app.main:app). Add wwwroot to
-# PYTHONPATH so gunicorn can import the backend module from /home/site/wwwroot.
+# Startup command (Cloud Migration v2.0 §3.5). App Service uses the system Python/gunicorn
+# (not Oryx-built). PYTHONPATH must include both wwwroot (so backend.app.main is importable)
+# and .python_packages/lib/site-packages (so the system gunicorn finds uvicorn and all other
+# vendored deps). Without the second path, gunicorn starts but fails with
+# "No module named 'uvicorn'" because uvicorn is only in the vendored package directory.
 echo "Setting the App Service startup command (Gunicorn + UvicornWorker)..."
 az webapp config set --name "$APP_SERVICE_NAME" --resource-group "$RG" \
-  --startup-file "PYTHONPATH=/home/site/wwwroot gunicorn -w 4 -k uvicorn.workers.UvicornWorker backend.app.main:app"
+  --startup-file "PYTHONPATH=/home/site/wwwroot:/home/site/wwwroot/.python_packages/lib/site-packages gunicorn -w 4 -k uvicorn.workers.UvicornWorker backend.app.main:app"
 
 # Bootstrap the PostgreSQL schema with the same script used for production
 # (Cloud Migration v2.0 §5). Requires schema/bootstrap_pg.sql (open item, Cloud
@@ -108,15 +108,11 @@ rm -rf .python_packages
 cd "$OLDPWD"
 az webapp deploy --name "$APP_SERVICE_NAME" --resource-group "$RG" --src-path _api.zip --type zip
 
-# # After Oryx builds, manually copy backend to wwwroot if it's not there
-# az webapp ssh --name "$APP_SERVICE_NAME" --resource-group "$RG" << 'EOF'
-# if [ ! -d /home/site/wwwroot/backend ]; then
-#   echo "Copying backend directory to wwwroot..."
-#   find /tmp/zipdeploy -name backend -type d 2>/dev/null | head -1 | xargs -I {} cp -r {} /home/site/wwwroot/
-# fi
-# exit
-# EOF
-
+# Wait for the API to be ready before proceeding.
+# The deployment can complete before the app is fully up, so poll
+# the /api/health endpoint until it responds (or timeout after ~4 minutes).
+# This ensures the API is ready to serve requests before we deploy the
+#frontend or pipeline, which depend on it.
 echo "Waiting for API to be ready..."
 API_HOSTNAME="$(az webapp show --name "$APP_SERVICE_NAME" --resource-group "$RG" --query defaultHostName -o tsv)"
 MAX_RETRIES=120
@@ -135,7 +131,7 @@ rm -f _api.zip
 
 # Deploy the frontend to Static Web Apps where the phase has a UI surface.
 case "$PHASE" in
-  1|3|4|5|6|7|8|9)
+  0|1|3|4|5|6|7|8|9)
     echo "Deploying frontend to Static Web App..."
     ( cd frontend && npm ci && VITE_AUTH_ENABLED=true npm run build )
     SWA_TOKEN="$(az staticwebapp secrets list --name "$SWA_NAME" --resource-group "$RG" --query 'properties.apiKey' -o tsv)"
