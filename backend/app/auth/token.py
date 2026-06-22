@@ -49,7 +49,7 @@ def validate_access_token(token: str) -> dict[str, Any]:
     """Validate an Entra ID access token and return its claims.
 
     Verifies signature (RS256 against the tenant JWKS), ``exp``, ``aud`` (the OBS
-    API client id), and ``iss`` (the tenant v2.0 issuer). Raises
+    API client id), and ``iss`` (the tenant issuer in v1.0 or v2.0 format). Raises
     :class:`InvalidTokenError` on any failure.
     """
     if not token:
@@ -61,9 +61,24 @@ def validate_access_token(token: str) -> dict[str, Any]:
             signing_key.key,
             algorithms=["RS256"],
             audience=settings.entra_client_id,
-            issuer=settings.entra_issuer,
-            options={"require": ["exp", "aud", "iss"]},
+            issuer=None,
+            options={"require": ["exp", "aud", "iss"], "verify_iss": False},
         )
-    except jwt.PyJWTError as exc:  # expired, bad signature, wrong aud/iss, malformed
+        _verify_entra_issuer(claims.get("iss", ""))
+    except jwt.PyJWTError as exc:
         raise InvalidTokenError(str(exc)) from exc
+    except InvalidTokenError:
+        raise
     return claims
+
+
+def _verify_entra_issuer(issuer: str) -> None:
+    """Verify that the issuer is from the configured Entra tenant (v1.0 or v2.0 format)."""
+    tenant_id = settings.entra_tenant_id
+    valid_issuers = {
+        f"https://sts.windows.net/{tenant_id}/",
+        f"https://login.microsoftonline.com/{tenant_id}/",
+        f"https://login.microsoftonline.com/{tenant_id}/v2.0",
+    }
+    if issuer not in valid_issuers:
+        raise InvalidTokenError(f"Invalid issuer: {issuer}")
