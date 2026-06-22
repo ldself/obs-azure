@@ -106,7 +106,9 @@ zip -r "$OLDPWD/_api.zip" backend requirements.txt runtime.txt .python_packages 
   -x '*venv/*' '*.venv/*' '*__pycache__*' '*/.pyc'  >/dev/null
 rm -rf .python_packages
 cd "$OLDPWD"
-az webapp deploy --name "$APP_SERVICE_NAME" --resource-group "$RG" --src-path _api.zip --type zip
+az webapp deploy --name "$APP_SERVICE_NAME" \
+  --resource-group "$RG" --src-path _api.zip --type zip \
+  --clean true --restart true
 
 # Wait for the API to be ready before proceeding.
 # The deployment can complete before the app is fully up, so poll
