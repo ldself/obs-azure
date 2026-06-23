@@ -846,6 +846,41 @@ CREATE INDEX idx_notifications_user_unread_created
     ON obs.notifications (user_id, is_read, created_at DESC);
 
 -- =====================================================================
+-- SECTION 11 — PHASE 2 UNIQUE CONSTRAINTS (Data Integration Spec v1.8 §8)
+-- Required for idempotent merge() upserts (RULE 10).
+-- =====================================================================
+
+-- obs.actuals: partial unique index scoped to active (non-deleted) rows.
+-- Allows historical is_deleted=TRUE rows to share a natural key with the
+-- current active row; only one active row per natural key is permitted.
+CREATE UNIQUE INDEX uq_actuals_natural_key
+    ON obs.actuals (entity, year, month, cost_center, account, sub_account)
+    WHERE is_deleted = FALSE;
+
+-- obs.employees natural key: p_number + cost_center (DI Spec v1.8 §8.3).
+CREATE UNIQUE INDEX uq_employees_natural_key
+    ON obs.employees (p_number, cost_center);
+
+-- obs.cost_center_hierarchy_nodes natural key (DI Spec v1.8 §8.4.1).
+CREATE UNIQUE INDEX uq_cc_nodes
+    ON obs.cost_center_hierarchy_nodes (hierarchy_id, node_code);
+
+-- obs.cost_center_hierarchy_memberships natural key (DI Spec v1.8 §8.4.2).
+CREATE UNIQUE INDEX uq_cc_memberships
+    ON obs.cost_center_hierarchy_memberships (hierarchy_id, cost_center_code);
+
+-- obs.account_hierarchy_nodes natural key (DI Spec v1.8 §8.5.1).
+CREATE UNIQUE INDEX uq_acct_nodes
+    ON obs.account_hierarchy_nodes (hierarchy_id, node_code);
+
+-- obs.account_hierarchy_memberships natural key (DI Spec v1.8 §8.5.2).
+CREATE UNIQUE INDEX uq_acct_memberships
+    ON obs.account_hierarchy_memberships (hierarchy_id, account, sub_account);
+
+-- NOTE: obs.expense_accounts already has PRIMARY KEY (account, sub_account).
+-- NOTE: obs.ingestion_control already has idx_ingestion_control_dedup.
+
+-- =====================================================================
 -- NOT INCLUDED (no column-level DDL exists in any available spec):
 --   obs.fiscal_calendar — referenced only as a read API (Phase 3); the Phase 0
 --     table list does not include it and no schema is defined. Add when its

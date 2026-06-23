@@ -25,8 +25,9 @@ from backend.app.db import helpers
 
 
 class AuditEvent:
-    """Security-event audit type constants (Security Spec v1.4 §8.1)."""
+    """Canonical audit event type constants (Security Spec v1.4 §8.1; DI Spec v1.8 §8.6)."""
 
+    # Phase 1 — Security / User Management
     USER_PROVISIONED = "USER_PROVISIONED"
     LOGIN_PERMISSION_GRANTED = "LOGIN_PERMISSION_GRANTED"
     LOGIN_PERMISSION_REVOKED = "LOGIN_PERMISSION_REVOKED"
@@ -39,6 +40,12 @@ class AuditEvent:
     USER_LOGIN = "USER_LOGIN"
     USER_LOGIN_DENIED = "USER_LOGIN_DENIED"
     USER_LOGOUT = "USER_LOGOUT"
+
+    # Phase 2 — Data Integration (Data Integration Spec v1.8 §8.6)
+    INGESTION_COMPLETED = "INGESTION_COMPLETED"
+    INGESTION_REJECTED = "INGESTION_REJECTED"
+    INGESTION_QUARANTINED = "INGESTION_QUARANTINED"
+    QUARANTINE_REPROMOTED = "QUARANTINE_REPROMOTED"
 
 
 class Outcome:

@@ -195,17 +195,20 @@ Flag any direct promotion INSERT that bypasses `merge()`.
 Verify that the `key_cols` passed to `merge()` match the natural deduplication key
 for each target table, as defined in Data Integration Specification v1.8 §8:
 
-| Table | Natural key (conflict target) |
-|---|---|
-| `obs.actuals` | `entity`, `year`, `month`, `cost_center`, `account`, `sub_account` |
-| `obs.actuals_staging` | `staging_id` |
-| `obs.employees` | `employee_id` |
-| `obs.cost_center_hierarchy_nodes` | `cost_center_id` |
-| `obs.expense_accounts` | `account_code` |
-| `obs.account_hierarchy_nodes` | `node_id` |
-| `obs.ingestion_control` | `file_name`, `content_hash` |
+| Table | Natural key (conflict target) | Notes |
+|---|---|---|
+| `obs.actuals` | `entity`, `year`, `month`, `cost_center`, `account`, `sub_account` | Uses soft-delete versioning, NOT merge(). File-level SHA-256 dedup provides RULE 10. |
+| `obs.employees` | `p_number`, `cost_center` | merge() with `immutable_cols=['employee_id', 'created_at']` |
+| `obs.cost_center_hierarchy_nodes` | `hierarchy_id`, `node_code` | merge() with `immutable_cols=['node_id', 'created_at']` |
+| `obs.cost_center_hierarchy_memberships` | `hierarchy_id`, `cost_center_code` | merge() with `immutable_cols=['membership_id', 'created_at']` |
+| `obs.account_hierarchy_nodes` | `hierarchy_id`, `node_code` | merge() with `immutable_cols=['node_id', 'created_at']` |
+| `obs.account_hierarchy_memberships` | `hierarchy_id`, `account`, `sub_account` | merge() with `immutable_cols=['membership_id', 'created_at']` |
+| `obs.expense_accounts` | `account`, `sub_account` | Read-only via API (RULE 9); ingested by pipeline only |
+| `obs.ingestion_control` | `file_name`, `content_hash` | Dedup key per RULE 10 |
 
 Flag any `merge()` call where `key_cols` does not match the table's natural key.
+
+**Exception for obs.actuals:** The actuals pipeline intentionally uses soft-delete versioning (UPDATE existing rows to is_deleted=TRUE, INSERT new rows) rather than merge(). File-level SHA-256 dedup in obs.ingestion_control satisfies RULE 10 for actuals. This is documented in actuals_pipeline.py. Do NOT flag this as a RULE 10 violation.
 
 ### Check 10 — Integration test for idempotency
 

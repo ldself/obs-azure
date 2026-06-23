@@ -836,6 +836,40 @@ CREATE INDEX idx_notifications_user_unread_created
     ON obs.notifications (user_id, is_read, created_at DESC);
 
 -- =====================================================================
+-- SECTION 11 — PHASE 2 UNIQUE CONSTRAINTS (Data Integration Spec v1.8 §8)
+-- Required for idempotent merge() upserts (RULE 10).
+-- =====================================================================
+
+-- obs.actuals: no UNIQUE constraint — soft-delete versioning means multiple rows
+-- may share a natural key (one active, N historical is_deleted=TRUE). Idempotency
+-- is enforced at the file level via (file_name, content_hash) in ingestion_control
+-- (RULE 10). DuckDB does not support partial indexes; PostgreSQL bootstrap carries
+-- the partial UNIQUE index for active-row integrity (see bootstrap_pg.sql).
+
+-- obs.employees natural key: p_number + cost_center (DI Spec v1.8 §8.3).
+CREATE UNIQUE INDEX uq_employees_natural_key
+    ON obs.employees (p_number, cost_center);
+
+-- obs.cost_center_hierarchy_nodes natural key (DI Spec v1.8 §8.4.1).
+CREATE UNIQUE INDEX uq_cc_nodes
+    ON obs.cost_center_hierarchy_nodes (hierarchy_id, node_code);
+
+-- obs.cost_center_hierarchy_memberships natural key (DI Spec v1.8 §8.4.2).
+CREATE UNIQUE INDEX uq_cc_memberships
+    ON obs.cost_center_hierarchy_memberships (hierarchy_id, cost_center_code);
+
+-- obs.account_hierarchy_nodes natural key (DI Spec v1.8 §8.5.1).
+CREATE UNIQUE INDEX uq_acct_nodes
+    ON obs.account_hierarchy_nodes (hierarchy_id, node_code);
+
+-- obs.account_hierarchy_memberships natural key (DI Spec v1.8 §8.5.2).
+CREATE UNIQUE INDEX uq_acct_memberships
+    ON obs.account_hierarchy_memberships (hierarchy_id, account, sub_account);
+
+-- NOTE: obs.expense_accounts already has PRIMARY KEY (account, sub_account).
+-- NOTE: obs.ingestion_control already has idx_ingestion_control_dedup.
+
+-- =====================================================================
 -- NOT INCLUDED (no column-level DDL exists in any available spec):
 --   obs.fiscal_calendar — referenced only as a read API (Phase 3); the Phase 0
 --     table list does not include it and no schema is defined. Add when its

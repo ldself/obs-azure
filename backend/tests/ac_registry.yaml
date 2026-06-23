@@ -201,3 +201,67 @@ phase_1:
   - id: AC-AUDIT-07
     description: Audit records are retained for a minimum of 3 years (PostgreSQL retention policy).
     verification: infra
+
+phase_2:
+  - id: AC-OI-DI-01
+    description: >-
+      SHA-256 dedup: a file with the same name and content_hash that already has a
+      COMPLETED ingestion_control record is skipped without creating duplicate rows.
+    test: backend/tests/unit/test_actuals_pipeline.py::test_idempotent_duplicate_file
+
+  - id: AC-OI-DI-02
+    description: >-
+      A file whose error_rate exceeds 80% is rejected entirely — status=FAILED,
+      0 rows promoted to the target table.
+    test: backend/tests/unit/test_actuals_pipeline.py::test_80pct_error_rate_rejects_file
+
+  - id: AC-OI-DI-03
+    description: >-
+      Non-USD actuals rows are quarantined with reason NON_USD_CURRENCY and never
+      promoted to obs.actuals (OI-DI-03).
+    test: backend/tests/unit/test_actuals_pipeline.py::test_non_usd_quarantined
+
+  - id: AC-OI-DI-04
+    description: >-
+      Both Teams webhook AND Email fire for pipeline alert events; a failure in
+      either channel must not roll back the pipeline or suppress the other channel
+      (OI-DI-04, RULE 7).
+    test: backend/tests/unit/test_actuals_pipeline.py::test_alert_failure_is_non_fatal
+
+  - id: AC-OI-DI-05
+    description: >-
+      When a missing dimension is resolved (e.g. a cost center hierarchy import
+      adds CC-9999), PENDING quarantine records blocked by that dimension are
+      automatically re-promoted without a manual trigger (OI-DI-05).
+    test: backend/tests/unit/test_hierarchy_pipeline.py::test_sweep_repromotes_pending_quarantine_after_cc_hierarchy
+
+  - id: AC-OI-DI-06
+    description: >-
+      Cost center hierarchy re-imports are blocked once the initial seed is present;
+      the pipeline returns STATUS_FAILED and the API returns HTTP 405 (OI-DI-06).
+    test: backend/tests/unit/test_hierarchy_pipeline.py::test_cc_hierarchy_blocked_after_seed
+
+  - id: AC-OI-DI-07
+    description: >-
+      POST/PUT/DELETE on obs.expense_accounts and obs.account_hierarchy_nodes via
+      API returns HTTP 405 — these tables are read-only (RULE 9).
+    test: backend/tests/integration/test_dimensions_api.py::test_expense_accounts_is_readonly
+
+  - id: AC-OI-DI-08
+    description: >-
+      Every ingestion mutation writes the correct audit event to obs.audit_log in
+      the same transaction (RULE 6).
+    test: backend/tests/unit/test_actuals_pipeline.py::test_ingestion_completed_audit_event
+
+  - id: AC-OI-DI-09
+    description: >-
+      Employee upsert on the same natural key (p_number, cost_center) preserves the
+      stable employee_id UUID and created_at timestamp across updates.
+    test: backend/tests/unit/test_employees_pipeline.py::test_upsert_preserves_employee_id_and_created_at
+
+  - id: AC-OI-DI-10
+    description: >-
+      Dimension GET endpoints (cost centers, cost center hierarchy, account hierarchy,
+      expense accounts) are accessible to any authenticated active user regardless of
+      role or cost center assignment.
+    test: backend/tests/integration/test_dimensions_api.py::test_dimension_reads_accessible_to_non_admin
