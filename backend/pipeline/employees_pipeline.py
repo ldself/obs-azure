@@ -50,11 +50,22 @@ _REQUIRED_STR_FIELDS = [
 ]
 
 
-def run(file_path: str | None = None) -> str | None:
+def run(
+    file_path: str | None = None,
+    *,
+    actor_user_id: str | None = None,
+    triggered_by: str | None = None,
+) -> str | None:
     """Entry point invoked by the Makefile and the Azure Function trigger.
 
     Returns the ingestion_id on success, None if the file was skipped.
+    ``actor_user_id`` defaults to SYSTEM_USER_ID for scheduled runs; pass the
+    authenticated user's ID for manual triggers (RULE 6).
+    ``triggered_by`` defaults to TRIGGERED_SCHEDULED.
     """
+    resolved_actor = actor_user_id or ps.SYSTEM_USER_ID
+    resolved_triggered_by = triggered_by or ps.TRIGGERED_SCHEDULED
+
     landing_zone = os.environ.get("LANDING_ZONE_PATH", "./local-data/landing-zone")
     archive_path = os.environ.get("ARCHIVE_PATH", "./local-data/archive")
     error_path = os.environ.get("ERROR_PATH", "./local-data/error")
@@ -82,6 +93,8 @@ def run(file_path: str | None = None) -> str | None:
             content_hash=content_hash,
             file_format=file_format,
             ingestion_id=ingestion_id,
+            actor_user_id=resolved_actor,
+            triggered_by=resolved_triggered_by,
         )
         _move_file(resolved_path, archive_path, file_name)
         return ingestion_id
@@ -203,6 +216,8 @@ def _process(
     content_hash: str,
     file_format: str,
     ingestion_id: str,
+    actor_user_id: str,
+    triggered_by: str,
 ) -> None:
     ph = engine.placeholder()
     now = datetime.now(timezone.utc)
@@ -235,7 +250,7 @@ def _process(
     error_rate = (quarantined_rows + hard_rejected) / total_rows if total_rows > 0 else 0.0
 
     with helpers.transaction() as conn:
-        ps.create_ingestion_record(
+        if not ps.create_ingestion_record(
             conn,
             ingestion_id=ingestion_id,
             file_name=file_name,
@@ -243,8 +258,10 @@ def _process(
             file_type=FILE_TYPE,
             source_system=SOURCE_SYSTEM,
             file_format=file_format,
-            triggered_by=ps.TRIGGERED_SCHEDULED,
-        )
+            triggered_by=triggered_by,
+        ):
+            logger.info("Atomic dedup: COMPLETED record exists for %s, skipping", file_name)
+            return
 
         if error_rate > 0.80:
             ps.update_ingestion_record(
@@ -262,7 +279,7 @@ def _process(
             audit_service.write_audit_event(
                 conn,
                 event_type=audit_service.AuditEvent.INGESTION_REJECTED,
-                user_id=ps.SYSTEM_USER_ID,
+                user_id=actor_user_id,
                 entity_type="ingestion",
                 entity_id=ingestion_id,
                 new_value={
@@ -389,7 +406,7 @@ def _process(
             audit_service.write_audit_event(
                 conn,
                 event_type=audit_service.AuditEvent.INGESTION_COMPLETED,
-                user_id=ps.SYSTEM_USER_ID,
+                user_id=actor_user_id,
                 entity_type="ingestion",
                 entity_id=ingestion_id,
                 new_value={
@@ -404,7 +421,7 @@ def _process(
                 audit_service.write_audit_event(
                     conn,
                     event_type=audit_service.AuditEvent.INGESTION_QUARANTINED,
-                    user_id=ps.SYSTEM_USER_ID,
+                    user_id=actor_user_id,
                     entity_type="ingestion",
                     entity_id=ingestion_id,
                     new_value={"quarantined_rows": quarantined_rows},

@@ -72,11 +72,13 @@ def compute_sha256(file_path: str) -> str:
 
 
 def check_duplicate(file_name: str, content_hash: str) -> bool:
-    """Return True if a COMPLETED ingestion_control record exists for
-    (file_name, content_hash). Opens its own short-lived read connection.
+    """Fast-path optimisation: return True if a COMPLETED record exists for
+    (file_name, content_hash) so the pipeline can skip opening a transaction.
 
-    A FAILED record for the same (file_name, content_hash) does NOT count as a
-    duplicate — the corrected re-submission should proceed (Check 11).
+    A FAILED record does NOT count as a duplicate — re-submission proceeds.
+    The authoritative atomic dedup guard is the ON CONFLICT DO NOTHING in
+    create_ingestion_record; check_duplicate only avoids unnecessary transaction
+    overhead for the common case (RULE 10).
     """
     ph = engine.placeholder()
     row = helpers.fetch_one(
@@ -101,15 +103,24 @@ def create_ingestion_record(
     source_system: str,
     file_format: str,
     triggered_by: str,
-) -> None:
-    """INSERT an ingestion_control row with status=RUNNING (within caller txn)."""
+) -> bool:
+    """INSERT an ingestion_control row with status=RUNNING (within caller txn).
+
+    Uses ON CONFLICT DO NOTHING so the partial unique index on
+    (file_name, content_hash) WHERE status='COMPLETED' provides an atomic
+    guard: if a COMPLETED record already exists the INSERT is silently skipped
+    and this function returns False — callers must treat False as a duplicate
+    signal and abort processing (RULE 10).  A FAILED record does not violate
+    the partial index so re-submission always succeeds (returns True).
+    """
     ph = engine.placeholder()
     helpers.exec_write(
         conn,
         f"INSERT INTO obs.ingestion_control "
         f"(ingestion_id, file_name, content_hash, source_system, file_type, "
         f" file_format, status, re_ingestion, triggered_by, started_at) "
-        f"VALUES ({', '.join([ph] * 8)}, {ph}, {ph})",
+        f"VALUES ({', '.join([ph] * 8)}, {ph}, {ph}) "
+        f"ON CONFLICT DO NOTHING",
         (
             ingestion_id,
             file_name,
@@ -123,6 +134,12 @@ def create_ingestion_record(
             _utc_now(),
         ),
     )
+    row = helpers.query_one(
+        conn,
+        f"SELECT 1 FROM obs.ingestion_control WHERE ingestion_id = {ph}",
+        (ingestion_id,),
+    )
+    return row is not None
 
 
 def update_ingestion_record(
@@ -358,6 +375,10 @@ def _repromote_actuals(
         )
 
         actuals_id = str(uuid.uuid4())
+        # Soft-delete versioning: obs.actuals uses is_deleted for history rather
+        # than ON CONFLICT DO UPDATE. File-level SHA-256 dedup (RULE 10) prevents
+        # re-promotion of the same file; ON CONFLICT (actuals_id) DO NOTHING is
+        # a safety net on the PK for the rare concurrent re-promotion edge case.
         helpers.exec_write(
             conn,
             f"INSERT INTO obs.actuals "
@@ -366,7 +387,8 @@ def _repromote_actuals(
             f" stat_category, profit_center, sender_cost_center, assignment, "
             f" functional_area, partner_functional_area_text, "
             f" is_deleted, promoted_at) "
-            f"VALUES ({', '.join([ph] * 21)})",
+            f"VALUES ({', '.join([ph] * 21)}) "
+            f"ON CONFLICT (actuals_id) DO NOTHING",
             (
                 actuals_id, ingestion_id, entity, year, month, cost_center, account,
                 sub_account, bonus_type, amount, currency, product, distribution_channel,

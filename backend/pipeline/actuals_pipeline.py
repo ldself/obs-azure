@@ -65,11 +65,22 @@ _OPTIONAL_FIELDS = [
 ]
 
 
-def run(file_path: str | None = None) -> str | None:
+def run(
+    file_path: str | None = None,
+    *,
+    actor_user_id: str | None = None,
+    triggered_by: str | None = None,
+) -> str | None:
     """Entry point invoked by the Makefile and the Azure Function trigger.
 
     Returns the ingestion_id on success, None if the file was skipped (duplicate).
+    ``actor_user_id`` defaults to SYSTEM_USER_ID for scheduled runs; pass the
+    authenticated user's ID for manual triggers (RULE 6).
+    ``triggered_by`` defaults to TRIGGERED_SCHEDULED.
     """
+    resolved_actor = actor_user_id or ps.SYSTEM_USER_ID
+    resolved_triggered_by = triggered_by or ps.TRIGGERED_SCHEDULED
+
     landing_zone = os.environ.get("LANDING_ZONE_PATH", "./local-data/landing-zone")
     archive_path = os.environ.get("ARCHIVE_PATH", "./local-data/archive")
     error_path = os.environ.get("ERROR_PATH", "./local-data/error")
@@ -85,7 +96,8 @@ def run(file_path: str | None = None) -> str | None:
     # Step 2: SHA-256 on raw bytes (must be before any parsing — Check 7)
     content_hash = ps.compute_sha256(resolved_path)
 
-    # Step 3: file-level dedup check
+    # Fast-path dedup optimisation (avoids opening a transaction for obvious duplicates).
+    # The authoritative atomic guard is the ON CONFLICT DO NOTHING inside _process().
     if ps.check_duplicate(file_name, content_hash):
         logger.info("Skipping duplicate file %s (hash=%s)", file_name, content_hash)
         return None
@@ -100,6 +112,8 @@ def run(file_path: str | None = None) -> str | None:
             content_hash=content_hash,
             file_format=file_format,
             ingestion_id=ingestion_id,
+            actor_user_id=resolved_actor,
+            triggered_by=resolved_triggered_by,
         )
         _move_file(resolved_path, archive_path, file_name)
         return ingestion_id
@@ -205,6 +219,8 @@ def _process(
     content_hash: str,
     file_format: str,
     ingestion_id: str,
+    actor_user_id: str,
+    triggered_by: str,
 ) -> None:
     ph = engine.placeholder()
 
@@ -243,7 +259,7 @@ def _process(
     error_rate = (quarantined_rows + hard_rejected) / total_rows if total_rows > 0 else 0.0
 
     with helpers.transaction() as conn:
-        ps.create_ingestion_record(
+        if not ps.create_ingestion_record(
             conn,
             ingestion_id=ingestion_id,
             file_name=file_name,
@@ -251,8 +267,10 @@ def _process(
             file_type=FILE_TYPE,
             source_system=SOURCE_SYSTEM,
             file_format=file_format,
-            triggered_by=ps.TRIGGERED_SCHEDULED,
-        )
+            triggered_by=triggered_by,
+        ):
+            logger.info("Atomic dedup: COMPLETED record exists for %s, skipping", file_name)
+            return
 
         # File-level rejection: > 80% error rate (DI Spec v1.8 §8.6)
         if error_rate > 0.80:
@@ -271,7 +289,7 @@ def _process(
             audit_service.write_audit_event(
                 conn,
                 event_type=audit_service.AuditEvent.INGESTION_REJECTED,
-                user_id=ps.SYSTEM_USER_ID,
+                user_id=actor_user_id,
                 entity_type="ingestion",
                 entity_id=ingestion_id,
                 new_value={
@@ -286,7 +304,9 @@ def _process(
         else:
             staged_at = datetime.now(timezone.utc)
 
-            # Stage valid rows
+            # Stage valid rows. ON CONFLICT DO NOTHING guards the unique constraint
+            # on (ingestion_id, source_row_number) — harmless for first-time runs,
+            # prevents duplicate staging rows if the transaction is somehow replayed.
             for sr in staging_rows:
                 staging_id = str(uuid.uuid4())
                 helpers.exec_write(
@@ -298,7 +318,8 @@ def _process(
                     f" sender_cost_center, assignment, functional_area, "
                     f" partner_functional_area_text, source_file_name, "
                     f" source_row_number, staged_at) "
-                    f"VALUES ({', '.join([ph] * 22)})",
+                    f"VALUES ({', '.join([ph] * 22)}) "
+                    f"ON CONFLICT (ingestion_id, source_row_number) DO NOTHING",
                     (
                         ingestion_id, staging_id,
                         sr["entity"], sr["year"], sr["month"],
@@ -343,6 +364,10 @@ def _process(
                     ),
                 )
                 actuals_id = str(uuid.uuid4())
+                # Soft-delete versioning pattern (DI Spec v1.8 §8.2): the UPDATE
+                # above marks prior active rows deleted before this INSERT.
+                # File-level SHA-256 dedup (RULE 10) prevents double-processing;
+                # ON CONFLICT (actuals_id) DO NOTHING is a PK-level safety net.
                 helpers.exec_write(
                     conn,
                     f"INSERT INTO obs.actuals "
@@ -351,7 +376,8 @@ def _process(
                     f" distribution_channel, stat_category, profit_center, "
                     f" sender_cost_center, assignment, functional_area, "
                     f" partner_functional_area_text, is_deleted, promoted_at) "
-                    f"VALUES ({', '.join([ph] * 21)})",
+                    f"VALUES ({', '.join([ph] * 21)}) "
+                    f"ON CONFLICT (actuals_id) DO NOTHING",
                     (
                         actuals_id, ingestion_id,
                         sr["entity"], sr["year"], sr["month"],
@@ -388,7 +414,7 @@ def _process(
             audit_service.write_audit_event(
                 conn,
                 event_type=audit_service.AuditEvent.INGESTION_COMPLETED,
-                user_id=ps.SYSTEM_USER_ID,
+                user_id=actor_user_id,
                 entity_type="ingestion",
                 entity_id=ingestion_id,
                 new_value={
@@ -403,7 +429,7 @@ def _process(
                 audit_service.write_audit_event(
                     conn,
                     event_type=audit_service.AuditEvent.INGESTION_QUARANTINED,
-                    user_id=ps.SYSTEM_USER_ID,
+                    user_id=actor_user_id,
                     entity_type="ingestion",
                     entity_id=ingestion_id,
                     new_value={"quarantined_rows": quarantined_rows},

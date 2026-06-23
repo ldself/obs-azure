@@ -42,13 +42,25 @@ SOURCE_SYSTEM_HIERARCHY = "ACCOUNTING"
 _MAX_LEVELS = 6
 
 
-def run(file_path: str | None = None, file_type: str | None = None) -> str | None:
+def run(
+    file_path: str | None = None,
+    file_type: str | None = None,
+    *,
+    actor_user_id: str | None = None,
+    triggered_by: str | None = None,
+) -> str | None:
     """Entry point invoked by the Makefile and the Azure Function trigger.
 
     Returns the ingestion_id on success, None if the file was skipped.
     ``file_type`` may be ps.FILE_TYPE_CC_HIERARCHY or ps.FILE_TYPE_ACCT_HIERARCHY;
     if omitted it is inferred from the file name prefix.
+    ``actor_user_id`` defaults to SYSTEM_USER_ID for scheduled runs; pass the
+    authenticated user's ID for manual triggers (RULE 6).
+    ``triggered_by`` defaults to TRIGGERED_SCHEDULED.
     """
+    resolved_actor = actor_user_id or ps.SYSTEM_USER_ID
+    resolved_triggered_by = triggered_by or ps.TRIGGERED_SCHEDULED
+
     landing_zone = os.environ.get("LANDING_ZONE_PATH", "./local-data/landing-zone")
     archive_path = os.environ.get("ARCHIVE_PATH", "./local-data/archive")
     error_path = os.environ.get("ERROR_PATH", "./local-data/error")
@@ -77,6 +89,8 @@ def run(file_path: str | None = None, file_type: str | None = None) -> str | Non
             file_format=file_format,
             file_type=resolved_type,
             ingestion_id=ingestion_id,
+            actor_user_id=resolved_actor,
+            triggered_by=resolved_triggered_by,
         )
         _move_file(resolved_path, archive_path, file_name)
         return ingestion_id
@@ -151,6 +165,8 @@ def _process(
     file_format: str,
     file_type: str,
     ingestion_id: str,
+    actor_user_id: str,
+    triggered_by: str,
 ) -> None:
     now = datetime.now(timezone.utc)
 
@@ -166,6 +182,8 @@ def _process(
             ingestion_id=ingestion_id,
             total_rows=total_rows,
             now=now,
+            actor_user_id=actor_user_id,
+            triggered_by=triggered_by,
         )
     else:
         _process_acct_hierarchy(
@@ -176,6 +194,8 @@ def _process(
             ingestion_id=ingestion_id,
             total_rows=total_rows,
             now=now,
+            actor_user_id=actor_user_id,
+            triggered_by=triggered_by,
         )
 
 
@@ -227,11 +247,13 @@ def _process_cc_hierarchy(
     ingestion_id: str,
     total_rows: int,
     now: datetime,
+    actor_user_id: str,
+    triggered_by: str,
 ) -> None:
     ph = engine.placeholder()
 
     with helpers.transaction() as conn:
-        ps.create_ingestion_record(
+        if not ps.create_ingestion_record(
             conn,
             ingestion_id=ingestion_id,
             file_name=file_name,
@@ -239,8 +261,10 @@ def _process_cc_hierarchy(
             file_type=ps.FILE_TYPE_CC_HIERARCHY,
             source_system=SOURCE_SYSTEM_HIERARCHY,
             file_format=file_format,
-            triggered_by=ps.TRIGGERED_SCHEDULED,
-        )
+            triggered_by=triggered_by,
+        ):
+            logger.info("Atomic dedup: COMPLETED record exists for %s, skipping", file_name)
+            return
 
         if _cc_hierarchy_is_seeded(conn):
             ps.update_ingestion_record(
@@ -258,7 +282,7 @@ def _process_cc_hierarchy(
             audit_service.write_audit_event(
                 conn,
                 event_type=audit_service.AuditEvent.INGESTION_REJECTED,
-                user_id=ps.SYSTEM_USER_ID,
+                user_id=actor_user_id,
                 entity_type="ingestion",
                 entity_id=ingestion_id,
                 new_value={"file_name": file_name, "reason": "OI-DI-06 blocked re-import"},
@@ -300,7 +324,7 @@ def _process_cc_hierarchy(
             audit_service.write_audit_event(
                 conn,
                 event_type=audit_service.AuditEvent.INGESTION_REJECTED,
-                user_id=ps.SYSTEM_USER_ID,
+                user_id=actor_user_id,
                 entity_type="ingestion",
                 entity_id=ingestion_id,
                 new_value={"file_name": file_name, "error_rate": error_rate},
@@ -425,7 +449,7 @@ def _process_cc_hierarchy(
         audit_service.write_audit_event(
             conn,
             event_type=audit_service.AuditEvent.INGESTION_COMPLETED,
-            user_id=ps.SYSTEM_USER_ID,
+            user_id=actor_user_id,
             entity_type="ingestion",
             entity_id=ingestion_id,
             new_value={
@@ -501,6 +525,8 @@ def _process_acct_hierarchy(
     ingestion_id: str,
     total_rows: int,
     now: datetime,
+    actor_user_id: str,
+    triggered_by: str,
 ) -> None:
     ph = engine.placeholder()
 
@@ -520,7 +546,7 @@ def _process_acct_hierarchy(
     error_rate = quarantined_count / total_rows if total_rows > 0 else 0.0
 
     with helpers.transaction() as conn:
-        ps.create_ingestion_record(
+        if not ps.create_ingestion_record(
             conn,
             ingestion_id=ingestion_id,
             file_name=file_name,
@@ -528,8 +554,10 @@ def _process_acct_hierarchy(
             file_type=ps.FILE_TYPE_ACCT_HIERARCHY,
             source_system=SOURCE_SYSTEM_HIERARCHY,
             file_format=file_format,
-            triggered_by=ps.TRIGGERED_SCHEDULED,
-        )
+            triggered_by=triggered_by,
+        ):
+            logger.info("Atomic dedup: COMPLETED record exists for %s, skipping", file_name)
+            return
 
         if error_rate > 0.80:
             ps.update_ingestion_record(
@@ -547,7 +575,7 @@ def _process_acct_hierarchy(
             audit_service.write_audit_event(
                 conn,
                 event_type=audit_service.AuditEvent.INGESTION_REJECTED,
-                user_id=ps.SYSTEM_USER_ID,
+                user_id=actor_user_id,
                 entity_type="ingestion",
                 entity_id=ingestion_id,
                 new_value={"file_name": file_name, "error_rate": error_rate},
@@ -670,7 +698,7 @@ def _process_acct_hierarchy(
         audit_service.write_audit_event(
             conn,
             event_type=audit_service.AuditEvent.INGESTION_COMPLETED,
-            user_id=ps.SYSTEM_USER_ID,
+            user_id=actor_user_id,
             entity_type="ingestion",
             entity_id=ingestion_id,
             new_value={

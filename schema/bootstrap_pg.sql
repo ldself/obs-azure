@@ -158,7 +158,8 @@ CREATE TABLE obs.actuals_staging (
     source_file_name             TEXT NOT NULL,
     source_row_number            INTEGER NOT NULL,
     staged_at                    TIMESTAMPTZ NOT NULL,
-    PRIMARY KEY (staging_id)
+    PRIMARY KEY (staging_id),
+    UNIQUE (ingestion_id, source_row_number)   -- RULE 10: atomic upsert guard
 );
 
 -- obs.actuals — Data Integration Spec v1.8 §8.2. [VERIFIED]
@@ -525,6 +526,11 @@ CREATE INDEX idx_actuals_not_deleted
     ON obs.actuals (is_deleted);
 CREATE INDEX idx_ingestion_control_dedup
     ON obs.ingestion_control (file_name, content_hash, status);
+-- RULE 10: prevents a second COMPLETED record for the same (file_name, content_hash).
+-- New RUNNING/FAILED rows are never blocked; only COMPLETED is unique-constrained.
+CREATE UNIQUE INDEX uidx_ingestion_control_completed
+    ON obs.ingestion_control (file_name, content_hash)
+    WHERE status = 'COMPLETED';
 
 -- =====================================================================
 -- SECTION 4 — BUSINESS RULES CONFIGURATION

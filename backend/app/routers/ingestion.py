@@ -185,11 +185,24 @@ def trigger_manual_ingestion(
 
     try:
         if file_type == ps.FILE_TYPE_ACTUALS:
-            ingestion_id = actuals_pipeline.run(file_path)
+            ingestion_id = actuals_pipeline.run(
+                file_path,
+                actor_user_id=current_user.user_id,
+                triggered_by=ps.TRIGGERED_MANUAL,
+            )
         elif file_type == ps.FILE_TYPE_EMPLOYEES:
-            ingestion_id = employees_pipeline.run(file_path)
+            ingestion_id = employees_pipeline.run(
+                file_path,
+                actor_user_id=current_user.user_id,
+                triggered_by=ps.TRIGGERED_MANUAL,
+            )
         elif file_type in (ps.FILE_TYPE_CC_HIERARCHY, ps.FILE_TYPE_ACCT_HIERARCHY):
-            ingestion_id = hierarchy_pipeline.run(file_path, file_type)
+            ingestion_id = hierarchy_pipeline.run(
+                file_path,
+                file_type,
+                actor_user_id=current_user.user_id,
+                triggered_by=ps.TRIGGERED_MANUAL,
+            )
         else:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

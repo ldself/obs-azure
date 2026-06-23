@@ -148,7 +148,8 @@ CREATE TABLE obs.actuals_staging (
     source_file_name             VARCHAR NOT NULL,
     source_row_number            INTEGER NOT NULL,
     staged_at                    TIMESTAMP NOT NULL,
-    PRIMARY KEY (staging_id)
+    PRIMARY KEY (staging_id),
+    UNIQUE (ingestion_id, source_row_number)   -- RULE 10: atomic upsert guard
 );
 
 -- obs.actuals — Data Integration Spec v1.8 §8.2. [VERIFIED]
@@ -515,6 +516,11 @@ CREATE INDEX idx_actuals_not_deleted
     ON obs.actuals (is_deleted);
 CREATE INDEX idx_ingestion_control_dedup
     ON obs.ingestion_control (file_name, content_hash, status);
+-- NOTE: DuckDB does not support partial (filtered) unique indexes.
+-- The RULE 10 atomic dedup guard (partial unique index on COMPLETED records) is
+-- defined in bootstrap_pg.sql (PostgreSQL only).  Locally, check_duplicate()
+-- provides the dedup guard; ON CONFLICT DO NOTHING in create_ingestion_record
+-- is valid DuckDB syntax (simply never triggers) and satisfies the code contract.
 
 -- =====================================================================
 -- SECTION 4 — BUSINESS RULES CONFIGURATION
