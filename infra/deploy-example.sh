@@ -152,7 +152,7 @@ esac
 case "$PHASE" in
   2|10)
     echo "Deploying Functions pipeline..."
-    ( cd backend/pipeline && func azure functionapp publish "${RG}-pipeline" --python );;
+    ( cd pipeline-functions && func azure functionapp publish "${RG}-pipeline" --python );;
 esac
 
 API_URL="$(az webapp show --name "$APP_SERVICE_NAME" --resource-group "$RG" --query defaultHostName -o tsv)"
