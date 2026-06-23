@@ -73,6 +73,21 @@ def fetch_one(sql: str, params: Sequence[Any] | None = None) -> tuple[Any, ...] 
         conn.close()
 
 
+def fetch_all_with_cols(
+    sql: str, params: Sequence[Any] | None = None
+) -> tuple[list[str], list[tuple[Any, ...]]]:
+    """Run a read query and return (column_names, rows). Used for SELECT * queries
+    where callers need to map results dynamically (e.g. quarantine row_data)."""
+    conn = engine.connect()
+    try:
+        result = _runner(conn, sql, params)
+        rows = list(result.fetchall())
+        col_names = [d[0] for d in result.description]
+        return col_names, rows
+    finally:
+        conn.close()
+
+
 # --- Mutation helpers (Phase 1+) -------------------------------------------------
 #
 # DuckDB permits only one read-write connection to a database file at a time.
@@ -118,3 +133,104 @@ def transaction() -> Iterator[Any]:
         raise
     finally:
         conn.close()
+
+
+# --- Idempotent upsert helpers (RULE 10) -----------------------------------------
+
+
+def merge(
+    conn: Any,
+    table: str,
+    key_cols: list[str],
+    data: dict[str, Any],
+    immutable_cols: list[str] | None = None,
+) -> None:
+    """Idempotent upsert of one record into ``table`` on the natural key ``key_cols``.
+
+    Routes to :func:`_pg_upsert` (atomic INSERT … ON CONFLICT DO UPDATE) on
+    PostgreSQL, or :func:`_duckdb_upsert` (DELETE + INSERT) on DuckDB — the
+    approved local substitute per Implementation Guide v1.2 §5.4.
+
+    ``data`` must contain values for ALL columns being written, including the key
+    columns. ``key_cols`` must correspond to an existing UNIQUE index on ``table``.
+
+    ``immutable_cols`` lists columns that must only be written on first INSERT and
+    must never be overwritten by an UPDATE (e.g. ``employee_id``, ``created_at``).
+    On PostgreSQL the DO UPDATE SET clause omits these columns. On DuckDB (≥ 0.10)
+    the same ON CONFLICT DO UPDATE syntax is used; the caller pre-fetches the
+    correct immutable column values and passes them in ``data``, so the DO UPDATE
+    SET clause includes them but writes the same value (idempotent).
+
+    Every pipeline promotion must call merge() — never a bare INSERT (RULE 10).
+    The exception is obs.actuals, which uses a soft-delete pattern (see
+    actuals_pipeline.py) and relies on file-level SHA-256 dedup for idempotency.
+    """
+    if engine.engine_name() == engine.DUCKDB:
+        _duckdb_upsert(conn, table, key_cols, data)
+    else:
+        _pg_upsert(conn, table, key_cols, data, immutable_cols or [])
+
+
+def _pg_upsert(
+    conn: Any,
+    table: str,
+    key_cols: list[str],
+    data: dict[str, Any],
+    immutable_cols: list[str],
+) -> None:
+    """PostgreSQL-specific atomic upsert via INSERT … ON CONFLICT DO UPDATE."""
+    ph = engine.placeholder()
+    all_cols = list(data.keys())
+    values = [data[c] for c in all_cols]
+
+    conflict_target = ", ".join(key_cols)
+    col_list = ", ".join(all_cols)
+    placeholders = ", ".join(ph for _ in all_cols)
+
+    update_cols = [c for c in all_cols if c not in key_cols and c not in immutable_cols]
+    if update_cols:
+        set_clause = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
+        do_update = f"DO UPDATE SET {set_clause}"
+    else:
+        do_update = "DO NOTHING"
+
+    sql = (
+        f"INSERT INTO {table} ({col_list}) VALUES ({placeholders}) "
+        f"ON CONFLICT ({conflict_target}) {do_update}"
+    )
+    exec_write(conn, sql, values)
+
+
+def _duckdb_upsert(
+    conn: Any,
+    table: str,
+    key_cols: list[str],
+    data: dict[str, Any],
+) -> None:
+    """DuckDB-specific upsert via INSERT … ON CONFLICT DO UPDATE (DuckDB ≥ 0.10).
+
+    DuckDB 0.10+ supports ON CONFLICT DO UPDATE on UNIQUE INDEXes, identical to
+    PostgreSQL syntax. The caller pre-fetches immutable column values (employee_id,
+    created_at) and passes them in ``data``, so the DO UPDATE SET clause can safely
+    include them (writing the same value is idempotent).
+    """
+    ph = engine.placeholder()
+    all_cols = list(data.keys())
+    values = [data[c] for c in all_cols]
+
+    conflict_target = ", ".join(key_cols)
+    col_list = ", ".join(all_cols)
+    placeholders = ", ".join(ph for _ in all_cols)
+
+    update_cols = [c for c in all_cols if c not in key_cols]
+    if update_cols:
+        set_clause = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
+        do_update = f"DO UPDATE SET {set_clause}"
+    else:
+        do_update = "DO NOTHING"
+
+    sql = (
+        f"INSERT INTO {table} ({col_list}) VALUES ({placeholders}) "
+        f"ON CONFLICT ({conflict_target}) {do_update}"
+    )
+    exec_write(conn, sql, values)

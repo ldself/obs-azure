@@ -84,21 +84,6 @@ SHA-256 content hash + file name as the deduplication key in `obs.ingestion_cont
 
 ---
 
-## Phase 1 Active Conventions
-
-Phase 1 — Authentication, User Registry & Security Core — is now **In Progress**.
-
-- The 7-step authorization flow (Security Spec v1.4 §9.1) is now enforced on every
-  endpoint. Confirm all 7 steps are present and ordered on every router added this phase.
-- Error codes follow Security Spec v1.4 §9.2: 401 (invalid/missing token), 403
-  (insufficient permission or inactive user), 404 (genuinely non-existent resource only),
-  409 (conflict), 422 (validation error).
-- Run the **auth-flow-reviewer** subagent after implementing each endpoint batch.
-- Run the **frontend-conventions-reviewer** subagent after implementing each UI component.
-- Run the **terminology-guard** subagent over any new schema or model file.
-
----
-
 ## Technology Stack (do not deviate)
 
 All decisions final (Architecture Spec v3.6 §2.4).
@@ -206,8 +191,42 @@ No phase is complete with any unchecked item. Full checklist in Implementation G
 
 ## Subagents
 
-Active subagents live in `.claude/agents/`. As of Phase 1, the active set is
-**spec-librarian**, **phase-gate-checker**, **azure-lifecycle-operator**,
-**terminology-guard**, **auth-flow-reviewer**, and **frontend-conventions-reviewer**.
-Additional review agents (audit-and-idempotency-reviewer, calculation-verifier) are added
-at the phases noted in the Subagents Specification v0.2.
+Active subagents live in `.claude/agents/`. The current active set is **spec-librarian**,
+**phase-gate-checker**, **azure-lifecycle-operator**, **terminology-guard**,
+**auth-flow-reviewer**, **frontend-conventions-reviewer**, and
+**audit-and-idempotency-reviewer**.
+
+The following agents remain deferred until their activation phases:
+- **calculation-verifier** — activate at Phase 4 (Subagents Specification v0.2 §4).
+
+---
+
+## Phase 1 Active Conventions (complete — conventions remain enforced)
+
+These conventions were activated in Phase 1 and remain in force for all subsequent phases:
+
+- The 7-step authorization flow (Security Spec v1.4 §9.1) is enforced on every endpoint.
+- Error codes follow Security Spec v1.4 §9.2: 401 (invalid token), 403 (unauthorized),
+  404 (genuinely not found), 409 (conflict), 422 (validation failure).
+- Never return 404 to obscure a resource from an unauthorized user — use 403.
+
+---
+
+## Phase 2 Active Conventions (current phase)
+
+These conventions are active for Phase 2 — Dimension Data & Ingestion Pipeline:
+
+- Every ingestion operation is idempotent: `INSERT … ON CONFLICT DO UPDATE` (RULE 10).
+  Re-running the same file twice produces unchanged row counts.
+- SHA-256 content hash + file name is the deduplication key in `obs.ingestion_control`.
+- `obs.expense_accounts` and `obs.account_hierarchy_nodes` have no UPDATE or DELETE
+  endpoints — return HTTP 405 for any write attempt (RULE 9).
+- Both Microsoft Teams (incoming webhook) AND Email must be notified for all pipeline
+  alert events (OI-DI-04 resolution).
+- Quarantine re-promotion is automatic: when a missing dimension is resolved, the pipeline
+  re-promotes affected records without a manual trigger (OI-DI-05 resolution).
+- Non-USD actuals records are rejected and quarantined — never promoted (OI-DI-03 resolution).
+- Cost center hierarchy re-imports are blocked post-seed; return HTTP 405 (OI-DI-06 resolution).
+- Every mutation writes its audit event to `obs.audit_log` (RULE 6).
+- Run the **audit-and-idempotency-reviewer** subagent over all new pipeline endpoints before
+  declaring the phase complete.

@@ -5,6 +5,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "./components/AppShell";
 import { useAuth } from "./auth/AuthContext";
 import { Login } from "./pages/Login";
+import { IngestionMonitor } from "./pages/admin/IngestionMonitor";
 import { UserManagement } from "./pages/admin/UserManagement";
 
 function FullPageSpinner(): JSX.Element {
@@ -26,6 +27,7 @@ export default function App(): JSX.Element {
       <Routes>
         <Route path="/" element={<Navigate to="/admin/users" replace />} />
         <Route path="/admin/users" element={<UserManagement />} />
+        <Route path="/admin/ingestion" element={<IngestionMonitor />} />
         <Route path="*" element={<Navigate to="/admin/users" replace />} />
       </Routes>
     </AppShell>

@@ -17,6 +17,7 @@ import Menu from "@mui/material/Menu";
 import MenuItem from "@mui/material/MenuItem";
 import Toolbar from "@mui/material/Toolbar";
 import Typography from "@mui/material/Typography";
+import BarChartIcon from "@mui/icons-material/BarChart";
 import PeopleIcon from "@mui/icons-material/People";
 import { useLocation, useNavigate } from "react-router-dom";
 
@@ -85,6 +86,17 @@ export function AppShell({ children }: { children: ReactNode }): JSX.Element {
                   <PeopleIcon />
                 </ListItemIcon>
                 <ListItemText primary="User Management" />
+              </ListItemButton>
+            )}
+            {user?.is_administrator && (
+              <ListItemButton
+                selected={location.pathname.startsWith("/admin/ingestion")}
+                onClick={() => navigate("/admin/ingestion")}
+              >
+                <ListItemIcon>
+                  <BarChartIcon />
+                </ListItemIcon>
+                <ListItemText primary="Ingestion Monitor" />
               </ListItemButton>
             )}
           </List>
