@@ -36,7 +36,7 @@ abbreviated in the glossary. Use `cost_center_id` not `cc_id`; `is_finance_revie
 `finance_reviewer_flag`; `ALL_WRITE` not `write_access`.
 
 **RULE 2 — Architecture decisions are final.** The technology stack, hosting model,
-authentication approach, data platform, and all decisions in Project Context Handoff v2.6
+authentication approach, data platform, and all decisions in Project Context Handoff v2.7
 are final. Do not propose alternative frameworks, databases, or approaches. If you believe
 a spec contains an error or contradiction, STOP and raise it as a question.
 
@@ -112,7 +112,7 @@ Consult in this order when detail is needed on any topic.
 
 | Document | Version | What it governs |
 |---|---|---|
-| Project Context Handoff | v2.6 | All decisions, open-item resolutions, authoritative reading order. Read first in any new session. |
+| Project Context Handoff | v2.7 | All decisions, open-item resolutions, authoritative reading order. Read first in any new session. |
 | System Context and Domain Glossary | v1.11 | Authoritative terminology. Every term in code, APIs, schemas, UI must match exactly. |
 | Application Architecture Specification | v3.6 | Stack, component architecture, API conventions, calculation service pattern, audit log, performance targets. |
 | Security and Access Control Specification | v1.4 | Capability flags, cost center grants, 7-step authorization flow, audit events, error standards. |
@@ -150,7 +150,7 @@ obs-azure/
 ├─ frontend/                # React TypeScript SPA (Vite, MUI)
 ├─ schema/                  # bootstrap.sql (DuckDB), bootstrap_pg.sql (PostgreSQL), seed/
 ├─ infra/                   # Azure CLI provisioning scripts (see Cloud Validation Strategy)
-├─ local-data/             # GIT-IGNORED: landing-zone/, archive/, error/, obs.duckdb
+├─ local-data/              # GIT-IGNORED: landing-zone/, archive/, error/, obs.duckdb
 ├─ .claude/agents/          # Claude Code subagents
 ├─ .env.local.example       # Template; .env.local is git-ignored
 ├─ Makefile                 # Local dev convenience commands
@@ -212,9 +212,9 @@ These conventions were activated in Phase 1 and remain in force for all subseque
 
 ---
 
-## Phase 2 Active Conventions (current phase)
+## Phase 2 Active Conventions (complete — conventions remain enforced)
 
-These conventions are active for Phase 2 — Dimension Data & Ingestion Pipeline:
+These conventions were activated in Phase 2 and remain in force for all subsequent phases:
 
 - Every ingestion operation is idempotent: `INSERT … ON CONFLICT DO UPDATE` (RULE 10).
   Re-running the same file twice produces unchanged row counts.
@@ -228,5 +228,20 @@ These conventions are active for Phase 2 — Dimension Data & Ingestion Pipeline
 - Non-USD actuals records are rejected and quarantined — never promoted (OI-DI-03 resolution).
 - Cost center hierarchy re-imports are blocked post-seed; return HTTP 405 (OI-DI-06 resolution).
 - Every mutation writes its audit event to `obs.audit_log` (RULE 6).
-- Run the **audit-and-idempotency-reviewer** subagent over all new pipeline endpoints before
-  declaring the phase complete.
+
+---
+
+## Phase 3 Active Conventions (current phase)
+
+These conventions are active for Phase 3 — Business Rules Configuration:
+
+- All rates, caps, and mappings are stored as data — never as literals (RULE 4).
+  The four business rules tables are the sole source of truth:
+  `obs.merit_increase_rates`, `obs.compensation_burden_rates`,
+  `obs.compensation_component_mappings`, `obs.overhead_allocation_rates`.
+- Administrator-only writes: any write to a business rules configuration endpoint
+  by a non-Administrator must return HTTP 403 (RULE 5, Step 3).
+- Component-mapping changes trigger a `COMPENSATION_MAPPING_UPDATED` audit event
+  and a recalculation stub for all open fiscal years (full recalculation wired in Phase 4).
+- Every mutation writes its audit event to `obs.audit_log` (RULE 6).
+- After coding, confirm no rate value appears as a literal anywhere in code (grep clean).
