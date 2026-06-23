@@ -147,8 +147,9 @@ case "$PHASE" in
     az storage account create --name "obsval${PHASE}fnstore" --resource-group "$RG" \
       --sku Standard_LRS --kind StorageV2
     az functionapp create --name "${RG}-pipeline" --resource-group "$RG" \
-      --consumption-plan-location "$AZURE_REGION" --runtime python --runtime-version 3.11 \
-      --functions-version 4 --os-type linux --storage-account "obsval${PHASE}fnstore"
+      --runtime python --runtime-version 3.11 --functions-version 4 \
+      --storage-account "obsval${PHASE}fnstore" \
+      --flexconsumption-location "$AZURE_REGION"
     echo "Assigning Functions managed identity and granting Key Vault secret access (§4.3)..."
     FN_PRINCIPAL_ID="$(az functionapp identity assign --name "${RG}-pipeline" --resource-group "$RG" \
       --query principalId -o tsv)"
