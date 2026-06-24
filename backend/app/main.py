@@ -27,6 +27,7 @@ from backend.app.config import assert_local_auth_bypass_safe  # the RULE 8 safet
 from backend.app.config import settings  # all configuration values, read from env vars at startup
 from backend.app.db import engine  # the DuckDB-vs-PostgreSQL database switch
 from backend.app.routers import auth_routes  # BFF OIDC endpoints (/api/v1/auth/*)
+from backend.app.routers import business_rules  # business rules configuration (Phase 3)
 from backend.app.routers import dimensions  # read-only dimension data (Phase 2)
 from backend.app.routers import ingestion  # ingestion monitoring + trigger (Phase 2)
 from backend.app.routers import users  # user registry + grant endpoints (§4.1.3)
@@ -117,3 +118,4 @@ app.include_router(auth_routes.router)
 app.include_router(users.router)
 app.include_router(ingestion.router)
 app.include_router(dimensions.router)
+app.include_router(business_rules.router)  # Phase 3: business rules configuration

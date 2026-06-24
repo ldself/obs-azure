@@ -108,3 +108,101 @@ export interface QuarantineRecord {
   source_row_number: number;
   row_data: Record<string, unknown>;
 }
+
+// ---------------------------------------------------------------------------
+// Phase 3 — Business Rules Configuration (Build Plan v1.2 §4.3)
+// ---------------------------------------------------------------------------
+
+export interface MeritIncreaseRate {
+  rate_id: string;
+  fiscal_year: number;
+  rate_pct: string;
+  effective_date: string;
+  updated_at: string | null;
+  updated_by: string | null;
+}
+
+export interface MeritIncreaseRateUpsert {
+  rate_pct: string;
+  effective_date: string;
+}
+
+export interface CompensationBurdenRate {
+  rate_id: string;
+  fiscal_year: number;
+  fica_rate_pct: string;
+  fica_wage_cap: string;
+  medicare_rate_pct: string;
+  state_income_tax_rate_pct: string;
+  federal_income_tax_rate_pct: string;
+  suta_rate_pct: string;
+  suta_wage_cap: string;
+  futa_rate_pct: string;
+  futa_wage_cap: string;
+  other_benefits_rate_pct: string;
+  updated_at: string | null;
+  updated_by: string | null;
+}
+
+export interface CompensationBurdenRateUpsert {
+  fica_rate_pct: string;
+  fica_wage_cap: string;
+  medicare_rate_pct: string;
+  state_income_tax_rate_pct: string;
+  federal_income_tax_rate_pct: string;
+  suta_rate_pct: string;
+  suta_wage_cap: string;
+  futa_rate_pct: string;
+  futa_wage_cap: string;
+  other_benefits_rate_pct: string;
+}
+
+export interface CompensationComponentMapping {
+  mapping_id: string;
+  component_code: string;
+  account_code: string;
+  updated_at: string | null;
+  updated_by: string | null;
+}
+
+export interface CompensationComponentMappingUpdate {
+  account_code: string;
+}
+
+export type RatePeriod = "Monthly" | "Annual";
+
+export interface OverheadAllocationRate {
+  rate_id: string;
+  account_code: string;
+  geography_code: string | null;
+  amount_per_employee: string;
+  rate_period: RatePeriod;
+  fiscal_year: number;
+  is_active: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+  updated_by: string | null;
+}
+
+export interface OverheadAllocationRateCreate {
+  account_code: string;
+  geography_code?: string | null;
+  amount_per_employee: string;
+  rate_period: RatePeriod;
+  fiscal_year: number;
+}
+
+export interface OverheadAllocationRateUpdate {
+  amount_per_employee?: string;
+  rate_period?: RatePeriod;
+}
+
+export interface FiscalPeriod {
+  calendar_id: string;
+  fiscal_year: number;
+  period_number: number;
+  period_name: string;
+  start_date: string;
+  end_date: string;
+  is_current: boolean;
+}

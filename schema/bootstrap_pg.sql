@@ -595,6 +595,22 @@ CREATE TABLE obs.overhead_allocation_rates (
     CHECK (rate_period IN ('Monthly','Annual'))
 );
 
+-- obs.fiscal_calendar — Application Architecture Spec v3.6 (Phase 3 read API).
+-- Status: [INFERRED] — no explicit DDL in available spec; schema inferred from
+--   fiscal_year + period_number usage in obs.budget_lines and obs.actuals.
+CREATE TABLE obs.fiscal_calendar (
+    calendar_id   TEXT    NOT NULL,
+    fiscal_year   INTEGER NOT NULL,
+    period_number INTEGER NOT NULL,
+    period_name   TEXT    NOT NULL,   -- e.g. 'FY2026-P01'
+    start_date    DATE    NOT NULL,
+    end_date      DATE    NOT NULL,
+    is_current    BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (calendar_id),
+    UNIQUE (fiscal_year, period_number),
+    CHECK (period_number BETWEEN 1 AND 13)
+);
+
 -- =====================================================================
 -- SECTION 5 — WORKFORCE PLANNING
 -- Source: Workforce Planning FR v1.1 §4 (positions), §7.4 (transfers)
@@ -888,9 +904,7 @@ CREATE UNIQUE INDEX uq_acct_memberships
 
 -- =====================================================================
 -- NOT INCLUDED (no column-level DDL exists in any available spec):
---   obs.fiscal_calendar — referenced only as a read API (Phase 3); the Phase 0
---     table list does not include it and no schema is defined. Add when its
---     authoritative definition is available.
+--   obs.fiscal_calendar — added in Phase 3 (schema inferred; see Section 4).
 -- TABLES STILL MARKED [UNVERIFIED] (Section 3): obs.cost_centers,
 --   obs.expense_accounts — no authoritative DDL in any available document.
 -- TABLES MARKED [DERIVED] (Section 6): obs.budget_versions, obs.budget_lines —

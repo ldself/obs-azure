@@ -19,6 +19,7 @@ import Toolbar from "@mui/material/Toolbar";
 import Typography from "@mui/material/Typography";
 import BarChartIcon from "@mui/icons-material/BarChart";
 import PeopleIcon from "@mui/icons-material/People";
+import SettingsIcon from "@mui/icons-material/Settings";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { useAuth } from "../auth/AuthContext";
@@ -99,6 +100,15 @@ export function AppShell({ children }: { children: ReactNode }): JSX.Element {
                 <ListItemText primary="Ingestion Monitor" />
               </ListItemButton>
             )}
+            <ListItemButton
+              selected={location.pathname.startsWith("/admin/business-rules")}
+              onClick={() => navigate("/admin/business-rules")}
+            >
+              <ListItemIcon>
+                <SettingsIcon />
+              </ListItemIcon>
+              <ListItemText primary="Business Rules" />
+            </ListItemButton>
           </List>
         </Box>
       </Drawer>
