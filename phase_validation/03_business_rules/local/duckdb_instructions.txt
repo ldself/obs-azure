@@ -1,0 +1,6 @@
+-- In the DuckDB CLI (duckdb with no file arg, or duckdb :memory:)
+ATTACH 'local-data/obs.duckdb' AS obsdb;
+USE obsdb;
+
+-- Now obs.* resolves unambiguously
+SELECT * FROM obs.audit_log ORDER BY event_timestamp DESC LIMIT 20;
